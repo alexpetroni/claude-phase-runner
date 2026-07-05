@@ -1,0 +1,6 @@
+# Secrets and per-project config — never commit these.
+credentials.env
+runner.env
+
+# Runtime state (resume file, agent logs, summaries).
+state/

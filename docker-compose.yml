@@ -1,0 +1,57 @@
+# Launched via run.sh — do not `docker compose run` this directly unless you
+# have exported the runner.env variables into your shell first.
+services:
+  runner:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        EXTRA_APT_PACKAGES: ${EXTRA_APT_PACKAGES:-}
+    image: claude-phase-runner:latest
+    # Agent credentials live in credentials.env, SEPARATE from the target
+    # project's own env files — so the agent can freely manage the project's
+    # .env without clobbering its own token. Put ONE of these in it:
+    #   CLAUDE_CODE_OAUTH_TOKEN=...   (subscription, via `claude setup-token`)
+    #   ANTHROPIC_API_KEY=...         (API billing)
+    env_file:
+      - path: credentials.env
+        required: true
+    environment:
+      PROJECT_DIR: ${PROJECT_DIR}
+      ENTRY_FILE: ${ENTRY_FILE}
+      PHASE_FILES: ${PHASE_FILES}
+      RETRY_SCHEDULE: ${RETRY_SCHEDULE:-30 300 3600 10800}
+      STALL_TIMEOUT: ${STALL_TIMEOUT:-1800}
+      GATE_CMD: ${GATE_CMD:-}
+      GIT_REMOTE: ${GIT_REMOTE:-origin}
+      GIT_BRANCH: ${GIT_BRANCH:-}
+      PUSH: ${PUSH:-1}
+      DRY_RUN: ${DRY_RUN:-}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-}
+      GIT_AUTHOR_NAME: ${GIT_AUTHOR_NAME:-Phase Runner}
+      GIT_AUTHOR_EMAIL: ${GIT_AUTHOR_EMAIL:-runner@phase.local}
+    volumes:
+      # Mount the project at the same path the host sees, so any compose bind
+      # mounts inside the project still resolve when the agent runs
+      # `docker compose up` against the host daemon (docker-out-of-docker).
+      - ${PROJECT_DIR}:${PROJECT_DIR}
+      # Host Docker daemon, for the project's stack + test containers.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Runner state: phases-done, logs, SUMMARY.md — survives container death.
+      - ./state:/state
+      # Forwarded SSH agent for `git push` (run.sh points this at the real
+      # socket when one exists, or at /dev/null otherwise).
+      - ${HOST_SSH_AUTH_SOCK:-/dev/null}:/ssh-agent
+      # Driver mounted over the baked copy so it can be iterated on without an
+      # image rebuild.
+      - ./docker/driver.sh:/usr/local/bin/driver.sh:ro
+    working_dir: ${PROJECT_DIR}
+    # DooD means the project's stack runs as SIBLING containers with ports
+    # published on the host — 127.0.0.1 inside this container cannot reach
+    # them. host.docker.internal resolves to the host gateway instead
+    # (e.g. curl http://host.docker.internal:8080/health).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Phases run long; keep stdin/tty for interactive follow-along.
+    stdin_open: true
+    tty: true
