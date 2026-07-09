@@ -7,6 +7,11 @@ retries when the Claude API errors or hangs, optional independent
 verification gates, and a **commit + push after every phase**. A killed or
 crashed run resumes exactly where it stopped.
 
+Two optional report-only passes bracket the build: `run.sh preflight` assesses
+what tooling to provision *before* building, and `run.sh review` adversarially
+evaluates the finished project. Both write a report and change nothing — see
+[Commands](#commands).
+
 Generalized from the `grounded-flow` builder (`docker-compose.builder.yml` +
 `docker/builder/`) and the crash-safety lessons of its
 `scripts/refactor-driver.sh`.
@@ -38,8 +43,25 @@ docker-compose.yml        container definition (same-path repo mount, DooD)
 docker/Dockerfile         node 24 + git + docker CLI + pnpm + Claude Code
 docker/bootstrap.sh       root entrypoint: socket group, git config, drop to node
 docker/driver.sh          the phase loop: retries, gates, commit, push, resume
-state/                    created at runtime: phases-done, logs/, SUMMARY.md
+state/                    created at runtime: phases-done, logs/, SUMMARY.md,
+                          TOOLING.md (preflight), REVIEW.md (review)
 ```
+
+## Commands
+
+`run.sh` takes an optional subcommand. All three read the same `runner.env`; the
+two report passes change nothing and stop, so you stay in the loop.
+
+| Command | What it does |
+|---|---|
+| `bash run.sh` | **Build.** Run the phases in order (the default). |
+| `bash run.sh preflight` | **Assess tooling before building.** Read the plan and write `state/TOOLING.md` — which skills, MCP servers, plugins, apt packages, and credentials to provision — then stop. |
+| `bash run.sh review` | **Review after building.** Adversarially evaluate the finished project and write `state/REVIEW.md` — a prioritized list of what to improve/simplify/harden — then stop. |
+
+A typical project lifecycle: `preflight` → provision what it found → `bash run.sh`
+(build) → `review` → turn the findings you accept into new phases → build again.
+See [Pre-flight assessment](#pre-flight-tooling-assessment) and
+[Final review](#final-adversarial-review) for how each report feeds the build.
 
 ## Prerequisites
 
@@ -134,7 +156,17 @@ composed **first phase prompt** — exactly what the agent would receive — the
 exits without launching any agent. Read that prompt; if it says what you
 mean, you're ready.
 
-### 5. Run
+### 5. (Optional) Pre-flight tooling assessment
+
+```bash
+bash run.sh preflight                     # uses ./runner.env
+bash run.sh preflight path/to/other.env   # or an explicit config
+```
+
+Read `state/TOOLING.md`, provision what it recommends, then build. See
+[Pre-flight assessment](#pre-flight-tooling-assessment).
+
+### 6. Run
 
 ```bash
 bash run.sh                     # uses ./runner.env
@@ -144,6 +176,15 @@ bash run.sh path/to/other.env   # or an explicit config
 Runs in the foreground (phases take hours — use `tmux`/`screen` for long
 sessions). `Ctrl-C` is safe at any time: everything committed so far is on
 the branch, and completed phases are recorded.
+
+### 7. (Optional) Review the finished project
+
+```bash
+bash run.sh review              # writes state/REVIEW.md, changes nothing
+```
+
+Read `state/REVIEW.md` and decide what to act on. See
+[Final review](#final-adversarial-review).
 
 ---
 
@@ -169,6 +210,41 @@ Per phase file, in order:
    branch is pushed (3 attempts, 30s apart).
 
 After the last phase, `state/SUMMARY.md` is written with the final `git log`.
+
+## Pre-flight tooling assessment
+
+```bash
+bash run.sh preflight
+```
+
+Before committing hours to an autonomous build, find out what the build will
+*need*. This pass reads the entry file and **every** phase plan, then writes a
+report to `state/TOOLING.md`: which Claude Code skills, MCP servers, plugins,
+apt packages, and external services/credentials each phase depends on, why, and
+exactly how to provision each one here. It touches nothing and then stops — no
+agent build, no commits.
+
+Why a separate pass instead of letting the build sort it out: the runner is
+**unattended**, so it cannot complete an OAuth handshake or paste a secret
+mid-build. Anything that needs credentials has to be in place *before* launch,
+or the phase that needs it stalls or fakes around it. Preflight surfaces those
+requirements while you can still act on them.
+
+**Using the findings — feed them back into config before you build:**
+
+- **Secrets / API keys / OAuth** → add to `credentials.env` (the agent's own
+  secret store), or configure the MCP server / plugin that needs them. This is
+  the item that *must* be done up front.
+- **System packages** (python, go, rust, image libs, …) → add to
+  `EXTRA_APT_PACKAGES` in `runner.env`; the image rebuilds on the next run.
+- **Skills / MCP servers / plugins** → make them available in the agent's
+  environment. Once present, Claude Code surfaces and invokes them on its own —
+  you generally don't need to name them in the phase prompts.
+- **Entry-file guidance** → if the assessment reveals a convention or tool the
+  agent should always prefer, fold a line into your `ENTRY_FILE` so every phase
+  inherits it.
+
+Then run the build (`bash run.sh`) with the environment it actually needs.
 
 ## Retries — "the API stopped responding"
 
@@ -217,6 +293,38 @@ committed; reset the branch yourself if you want the code gone too.
 
 **Note**: phases are keyed by their file path — renaming a phase file makes
 it look new and it will run again.
+
+## Final adversarial review
+
+```bash
+bash run.sh review
+```
+
+Run this once the build is finished. One agent re-reads the entry file and,
+grounded in it, evaluates the whole delivered project — *what can be improved,
+simplified, made more resilient* — and writes a prioritized report to
+`state/REVIEW.md`. Each item states what, why it matters, its severity, and the
+concrete fix it would make.
+
+It is **report-only by design**: it changes no code, config, docs, or git — not
+even small fixes. That keeps you in control. The review names problems; you
+decide which are worth acting on rather than having an unattended agent rewrite
+a project that just went green.
+
+**Using the review inside the build cycle:**
+
+1. Run `bash run.sh review` after the build and read `state/REVIEW.md`.
+2. Pick the findings you accept (skip the ones you disagree with or defer).
+3. Turn each accepted finding into a **new phase plan file** — a self-contained
+   slice with its own Definition of Done, exactly like the original phases.
+4. Append those files to `PHASE_FILES` in `runner.env` and run `bash run.sh`
+   again. Resume skips the already-done phases and builds only the new ones,
+   each committed and pushed like any other phase.
+
+This closes the loop: build → review → hardening phases → build, with a human
+approving what enters the plan each time. Customize the review instruction with
+`REVIEW_PROMPT` in `runner.env` if you want a different lens (e.g. security- or
+performance-focused); the entry file is still prepended for grounding.
 
 ## Pushing
 

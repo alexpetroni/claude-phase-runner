@@ -33,6 +33,8 @@ GIT_REMOTE="${GIT_REMOTE:-origin}"
 GIT_BRANCH="${GIT_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
 PUSH="${PUSH:-1}"
 GATE_CMD="${GATE_CMD:-}"
+PREFLIGHT="${PREFLIGHT:-0}"
+REVIEW="${REVIEW:-0}"
 
 log() { printf '\n\033[1;34m▶ %s\033[0m\n' "$*"; }
 die() {
@@ -156,6 +158,29 @@ push_branch() {
 }
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
+preflight_prompt() {
+  cat <<EOF
+$(cat "$ENTRY_FILE")
+
+The phase plan for this project, in execution order:
+$(for p in "${PHASES[@]}"; do echo "  - $p"; done)
+
+PRE-FLIGHT TOOLING ASSESSMENT — this runs BEFORE any building. Read the entry
+prompt above and every phase file listed, then assess what TOOLING would make
+this build faster and more reliable: Claude Code skills, MCP servers, plugins,
+system/apt packages, and external services or credentials the phases will need.
+
+For each recommendation state: what it is, which phase(s) need it, why, and
+exactly how the human provisions it here (add a secret to credentials.env, add a
+package to EXTRA_APT_PACKAGES, mount a skill/plugin, configure an MCP server,
+etc.). Flag anything requiring secrets or OAuth up front — the unattended runner
+cannot authenticate mid-build, so those must be in place before launch.
+
+This is a REPORT-ONLY pass. Do NOT modify the project in any way. Write ONLY the
+report, to the absolute path ${STATE}/TOOLING.md. Do not commit and do not push.
+EOF
+}
+
 phase_prompt() {
   cat <<EOF
 $(cat "$ENTRY_FILE")
@@ -186,6 +211,25 @@ Do not fake green.
 EOF
 }
 
+review_prompt() {
+  # Overridable in one place: set REVIEW_PROMPT to replace the wording below.
+  # The entry/constitution file is still prepended for grounding.
+  local body="${REVIEW_PROMPT:-Now make an adversarial evaluation on what can be improved, simplified, made more resilient. Do it thoroughly.}"
+  cat <<EOF
+$(cat "$ENTRY_FILE")
+
+FINAL ADVERSARIAL REVIEW — every planned phase is complete and committed.
+$body
+
+This is a REPORT-ONLY pass. Do NOT change the project in any way — not code,
+config, docs, or git. Not even small fixes. Every improvement, however safe it
+looks, goes into the report as a recommendation for the human to approve later.
+Write ONLY the report, to the absolute path ${STATE}/REVIEW.md: a prioritized
+list where each item states what, why it matters, severity, and the concrete
+fix you would make. Do not commit and do not push.
+EOF
+}
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 log "Phase runner starting in $PROJECT_DIR (branch: $GIT_BRANCH, remote: $GIT_REMOTE)"
 log "Phases: ${PHASES[*]}"
@@ -194,6 +238,30 @@ log "Retry schedule: ${SCHEDULE[*]}s; stall timeout: ${STALL_TIMEOUT}s"
 if [[ -n "${DRY_RUN:-}" ]]; then
   log "DRY RUN: config parsed, entry + phase files exist. First phase prompt follows."
   phase_prompt "${PHASES[0]}"
+  exit 0
+fi
+
+# ── Pre-flight tooling assessment (standalone; stops before building) ─────────
+# Read the plan and report what skills/MCP/plugins/packages/creds to provision.
+# Report-only and never touches the project or git: you read state/TOOLING.md,
+# provision, then set PREFLIGHT=0 and re-run to actually build.
+if [[ "$PREFLIGHT" == "1" ]]; then
+  log "Pre-flight tooling assessment: launching agent (log: state/logs/preflight.log)"
+  run_agent "$LOGS/preflight.log" "$(preflight_prompt)" \
+    || die "pre-flight assessment agent failed (state/logs/preflight.log)"
+  log "Assessment written to state/TOOLING.md — review it, provision tooling, then re-run to build."
+  exit 0
+fi
+
+# ── Final adversarial review (standalone; report-only) ────────────────────────
+# Run after the build (`run.sh review`): evaluate the finished project and write
+# a prioritized report. Changes nothing — you read state/REVIEW.md and give the
+# green light for improvements yourself.
+if [[ "$REVIEW" == "1" ]]; then
+  log "Final adversarial review: launching agent (log: state/logs/review.log)"
+  run_agent "$LOGS/review.log" "$(review_prompt)" \
+    || die "final adversarial review agent failed (state/logs/review.log)"
+  log "Review written to state/REVIEW.md — read it, then give the green light for improvements."
   exit 0
 fi
 
