@@ -1,0 +1,6 @@
+# Phase plan files, one per line, in execution order, relative to the project
+# root. Lines starting with # are comments. Append new phases at the end: a
+# re-run skips every phase already recorded in .phase-runner/state/phases-done
+# (keyed by this path — renaming a file makes it look new).
+docs/phases/PHASE-0.md
+docs/phases/PHASE-1.md

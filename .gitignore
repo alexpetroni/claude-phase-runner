@@ -1,6 +1,7 @@
-# Secrets and per-project config — never commit these.
-credentials.env
-runner.env
-
-# Runtime state (resume file, agent logs, summaries).
-state/
+# Nothing per-project or secret belongs in the kit any more:
+#   config + state  → <project>/.phase-runner/   (excluded via the project's .git/info/exclude)
+#   credentials     → ~/.config/claude-phase-runner/credentials.env
+# These patterns only keep legacy files from the old layout out of history.
+/credentials.env
+/runner*.env
+/state*/

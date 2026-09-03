@@ -1,14 +1,15 @@
-# Runner image: executes the Claude Code agent that builds a target project
-# phase by phase. Needs git, the Docker CLI + compose plugin (to drive the
-# project's stack via the host Docker socket — "Docker-out-of-Docker"), a node
-# toolchain, and Claude Code.
+# Runner image: executes the Claude Code agents (builder, reviewer, report
+# passes) against a target project mounted at its host path. Needs git, the
+# Docker CLI + compose plugin (to drive the project's stack via the host Docker
+# socket — "Docker-out-of-Docker"), a node toolchain, jq, and Claude Code.
 #
-# Project-specific toolchains: node+pnpm are baked in (covers most JS/TS
-# repos). For other stacks, add packages via EXTRA_APT_PACKAGES:
-#   docker compose build --build-arg EXTRA_APT_PACKAGES="python3 python3-pip"
+# Project-specific toolchains: node + pnpm are baked in (covers most JS/TS
+# repos). For other stacks set EXTRA_APT_PACKAGES in .phase-runner/runner.env.
+# Pin CLAUDE_CODE_VERSION there for reproducible runs (default: latest).
 FROM node:24-bookworm
 
 ARG EXTRA_APT_PACKAGES=""
+ARG CLAUDE_CODE_VERSION="latest"
 
 # Docker CLI + compose plugin (talks to the host daemon via the mounted socket)
 RUN apt-get update \
@@ -27,10 +28,12 @@ RUN apt-get update \
 # pnpm (via corepack) + Claude Code
 RUN corepack enable \
  && corepack prepare pnpm@latest --activate \
- && npm install -g @anthropic-ai/claude-code
+ && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
-COPY docker/bootstrap.sh /usr/local/bin/bootstrap.sh
-COPY docker/driver.sh /usr/local/bin/driver.sh
-RUN chmod +x /usr/local/bin/bootstrap.sh /usr/local/bin/driver.sh
+# Baked copy of the kit; docker-compose.yml bind-mounts the live one over it so
+# driver/prompt/guard edits take effect without a rebuild.
+ENV PHASE_RUNNER_HOME=/opt/phase-runner
+COPY docker  /opt/phase-runner/docker
+COPY prompts /opt/phase-runner/prompts
 
-ENTRYPOINT ["/usr/local/bin/bootstrap.sh"]
+ENTRYPOINT ["bash", "/opt/phase-runner/docker/bootstrap.sh"]

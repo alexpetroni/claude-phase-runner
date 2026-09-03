@@ -1,0 +1,1 @@
+The previous run was interrupted by an API failure or a stall. Inspect the repository state, then continue the same task from where it stopped. The original instructions still apply in full, including the structured report at the end.

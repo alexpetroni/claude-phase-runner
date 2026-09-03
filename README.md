@@ -2,401 +2,387 @@
 
 Autonomous, phase-by-phase project builder. It runs Claude Code with
 `--dangerously-skip-permissions` inside a sandboxed Docker container against a
-target git repository: **one agent run per phase plan file**, escalating
-retries when the Claude API errors or hangs, optional independent
-verification gates, and a **commit + push after every phase**. A killed or
-crashed run resumes exactly where it stopped.
+target git repository, **one builder run per phase plan file**, and then has an
+**independent reviewer** with a fresh context and no edit tools audit the phase
+before it counts. Transient API errors and hangs are retried on an escalating
+schedule, a killed run resumes where it stopped, and every verified phase is
+committed and pushed.
 
-Two optional report-only passes bracket the build: `run.sh preflight` assesses
-what tooling to provision *before* building, and `run.sh review` adversarially
-evaluates the finished project. Both write a report and change nothing — see
-[Commands](#commands).
-
-Generalized from the `grounded-flow` builder (`docker-compose.builder.yml` +
-`docker/builder/`) and the crash-safety lessons of its
-`scripts/refactor-driver.sh`.
+Everything per-project lives **inside the target project** under
+`.phase-runner/` (config, phase manifest, state, verdicts, logs), excluded from
+git locally. The kit directory holds code only. Credentials are user-level.
 
 ```
-┌ run.sh (host) ──────────────────────────────────────────────────────┐
-│ validate config → build image → docker compose run                  │
-│  ┌ container ─────────────────────────────────────────────────────┐ │
-│  │ bootstrap.sh (root): docker-socket group, git identity,        │ │
-│  │                      drop to non-root `node`                   │ │
-│  │  └ driver.sh: for each phase file, in order:                   │ │
-│  │      1. claude -p "<entry file> + execute ONLY this phase"     │ │
-│  │      2. on API error/hang → retry: 30s, 5m, 1h, 3h (--continue)│ │
-│  │      3. optional GATE_CMD (+ one remediation run)              │ │
-│  │      4. checkpoint-commit leftovers, record phase, git push    │ │
-│  └────────────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────────┘
+phase-runner build  (host)  →  docker compose run  →  driver.sh, per phase file:
+┌────────────────────────────────────────────────────────────────────────────┐
+│ 1. BUILDER   fresh context, edit tools, guard hook   → structured report    │
+│ 2. checkpoint commit (nothing in flight is ever lost)                       │
+│ 3. GATE      your command, e.g. lint && typecheck && test                   │
+│ 4. REVIEWER  fresh context, read-only, gets the diff → PASS / FAIL verdict  │
+│      FAIL or red gate → FIX round (builder, fresh context, the findings)    │
+│      ≤ MAX_FIX_ROUNDS, then the phase is BLOCKED and the run stops          │
+│ 5. record phase done → git push                                            │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
+
+The one-sentence philosophy, borrowed from the Cadence setup: **prompts steer,
+hooks enforce.** The builder is told not to push and not to verify itself; a
+`PreToolUse` guard hook makes sure it *cannot* push, cannot rewrite history,
+cannot touch the plan files, and that the reviewer cannot edit anything.
 
 ---
 
 ## Contents
 
 ```
-run.sh                    host launcher: validate config → build → run
-runner.env.example        per-project config — copy to runner.env
-credentials.env.example   agent token — copy to credentials.env
-docker-compose.yml        container definition (same-path repo mount, DooD)
-docker/Dockerfile         node 24 + git + docker CLI + pnpm + Claude Code
-docker/bootstrap.sh       root entrypoint: socket group, git config, drop to node
-docker/driver.sh          the phase loop: retries, gates, commit, push, resume
-state/                    created at runtime: phases-done, logs/, SUMMARY.md,
-                          TOOLING.md (preflight), REVIEW.md (review)
+bin/phase-runner          host CLI: init · build · preflight · review · status · logs · reset
+docker/Dockerfile         node 24 + git + docker CLI + pnpm + jq + Claude Code (pinnable)
+docker/bootstrap.sh       root entrypoint: socket group, git identity, trust, drop to node
+docker/driver.sh          the phase loop: builder → gate → reviewer → fix rounds → push
+docker/lib/               claude.sh (roles, retries, watchdog) · git.sh · common.sh · renderers
+docker/guard.sh           the enforcement hook (per-role rules, tested)
+prompts/*.md              builder, fix, reviewer, preflight, final-review instructions — edit freely
+templates/                runner.env, phases, credentials.env starting points
+tests/                    bash tests/run.sh — driver, CLI and guard tests with a fake `claude`
+docker-compose.yml        container definition (same-path repo mount, DooD, agent home)
+
+<project>/.phase-runner/  created by `phase-runner init`, excluded via .git/info/exclude
+  runner.env              per-project configuration
+  phases                  phase plan files, one per line, in order
+  home/                   the agent's ~/.claude (skills, agents, plugins, sessions)
+  state/phases-done       resume marker, one line per completed phase
+  state/blocked           phases the run gave up on, with the reason
+  state/runs.tsv          one row per agent run / gate / push: outcome, seconds, cost, turns
+  state/reviews/          <phase>.md + .json verdicts (latest), <phase>.r<N>.* per round
+  state/logs/             <phase>.build.log (+ .txt transcript), .fix.rN, .review.rN, .gate.rN
+  state/SUMMARY.md · TOOLING.md · REVIEW.md
 ```
+
+## Quick start
+
+```bash
+# once per machine
+ln -s "$PWD/bin/phase-runner" ~/.local/bin/phase-runner      # or add bin/ to PATH
+mkdir -p ~/.config/claude-phase-runner
+cp templates/credentials.env ~/.config/claude-phase-runner/credentials.env   # then add your token
+
+# in the target project
+cd ~/work/my-project
+phase-runner init                    # creates .phase-runner/{runner.env,phases}
+$EDITOR .phase-runner/runner.env     # ENTRY_FILE, GATE_CMD, models, push
+$EDITOR .phase-runner/phases         # the plan files, one per line
+phase-runner build --dry-run         # prints the exact first builder prompt, launches nothing
+phase-runner preflight               # optional: what tooling/credentials the plan needs
+phase-runner build                   # go (use tmux; Ctrl-C is safe at any time)
+phase-runner status                  # any time, from another terminal
+phase-runner logs -f                 # follow the live agent transcript
+phase-runner review                  # after the build: adversarial review → REVIEW.md
+```
+
+Prerequisites: Docker with the compose plugin, `jq` on the host (for `logs`
+and `status`), a target project that is a git repository, and a Claude Code
+credential — a subscription OAuth token from `claude setup-token` or an
+`ANTHROPIC_API_KEY`. For SSH push remotes, a running `ssh-agent` with the key
+added (see [Pushing](#pushing)).
 
 ## Commands
 
-`run.sh` takes an optional subcommand. All three read the same `runner.env`; the
-two report passes change nothing and stop, so you stay in the loop.
-
 | Command | What it does |
 |---|---|
-| `bash run.sh` | **Build.** Run the phases in order (the default). |
-| `bash run.sh preflight` | **Assess tooling before building.** Read the plan and write `state/TOOLING.md` — which skills, MCP servers, plugins, apt packages, and credentials to provision — then stop. |
-| `bash run.sh review` | **Review after building.** Adversarially evaluate the finished project and write `state/REVIEW.md` — a prioritized list of what to improve/simplify/harden — then stop. |
+| `phase-runner init` | Create `.phase-runner/` in the project from the templates and exclude it from git. Idempotent. |
+| `phase-runner build` | Run every pending phase (the default command). `--dry-run` validates everything, prints the first pending phase's builder prompt and exits. |
+| `phase-runner preflight` | Read-only tooling assessment of the whole plan → `.phase-runner/state/TOOLING.md`. |
+| `phase-runner review` | Read-only adversarial review of the finished project → `.phase-runner/state/REVIEW.md`. |
+| `phase-runner status` | Table of phases: status, last verdict, fix rounds, cost, minutes. No container. |
+| `phase-runner logs [PHASE] [-f]` | Readable transcript of the latest log, or the newest log matching PHASE. `-f` follows. |
+| `phase-runner reset [--yes]` | Delete `.phase-runner/state`. Config, phases and the agent home stay. |
 
-A typical project lifecycle: `preflight` → provision what it found → `bash run.sh`
-(build) → `review` → turn the findings you accept into new phases → build again.
-See [Pre-flight assessment](#pre-flight-tooling-assessment) and
-[Final review](#final-adversarial-review) for how each report feeds the build.
-
-## Prerequisites
-
-- Docker with the compose plugin on the host.
-- A **target project** that is a git repository with a pushable remote.
-- A Claude Code credential: either a subscription OAuth token
-  (`claude setup-token`) or an `ANTHROPIC_API_KEY`.
-- For SSH push remotes: a running `ssh-agent` with the key added (see
-  [Pushing](#pushing)).
-
-The kit lives anywhere on disk — it does not need to be inside the target
-project.
+All commands take `--project DIR` (default: the git repository containing the
+current directory).
 
 ---
 
-## Setup
+## What happens in a phase
 
-### 1. Credentials
+**1. Builder.** One `claude -p` run with a fresh context. Prompt = your entry
+file + `prompts/build.md`: execute exactly this phase, commit as you go, do not
+verify yourself, do not leave anything running in the background, return a
+structured report (`done` or `blocked`, summary, commits, blockers). A builder
+that reports `blocked` stops the run honestly: the work is checkpoint-committed
+and pushed, the phase is recorded in `state/blocked`, and
+`state/reviews/<phase>.blocked.md` holds its report.
 
-```bash
-cp credentials.env.example credentials.env
-# edit: set EXACTLY ONE of
-#   CLAUDE_CODE_OAUTH_TOKEN=...   (subscription — from `claude setup-token`)
-#   ANTHROPIC_API_KEY=...         (API billing)
-```
+**2. Checkpoint.** Anything the builder left uncommitted is committed as
+`chore(runner): checkpoint uncommitted work after <phase>`.
 
-This file is the agent's own secret store, deliberately separate from the
-target project's env files — the agent can freely create/modify the project's
-`.env` without ever touching its own token. Never commit it anywhere.
+**3. Gate.** `GATE_CMD` from the project root, logged to
+`state/logs/<phase>.gate.r<N>.log`. Red → a fix round with the output in the
+prompt. The gate proves *green*, not *done*; that is the reviewer's job.
 
-### 2. Prepare the target project
+**4. Reviewer.** A second `claude -p` run with a fresh context, `Edit`/`Write`
+disabled, and the guard hook refusing every git mutation. It gets the entry
+file, the phase file, the commit list and diffstat of the phase, and the gate
+output. Its instructions (`prompts/review.md`): list every Definition of Done
+item verbatim, verify each one *itself* against the repository — run the
+tests, read the files, grep — treating the builder's commit messages, notes
+and any self-written verification files as claims, not proof; hunt for skipped
+or vacuous tests, weakened existing tests, swallowed errors, broken entry-file
+invariants, out-of-scope work; review the diff for correctness with `file:line`
+findings and concrete fixes; no style nits. `PASS` only if every DoD item holds
+and there is no critical or high finding. The verdict is structured JSON,
+rendered to `state/reviews/<phase>.md` (DoD table with evidence + findings). If
+the reviewer leaves anything in the working tree it is discarded — everything
+was committed before it ran.
 
-The runner needs two kinds of files **inside the target repo**:
+**5. Fix rounds.** On a red gate or a `FAIL`, the builder comes back with a
+fresh context and the exact gate output or verdict (`prompts/fix.md`), fixes
+forward, commits; then gate and reviewer run again. `MAX_FIX_ROUNDS` (default
+2) caps this. When it is exhausted the phase is recorded as blocked, the work
+is pushed so nothing is lost, and the run stops for you: read
+`state/reviews/<phase>.md`, decide, re-run (the phase restarts from its prompt
+on top of the committed state).
 
-**An entry file** (`ENTRY_FILE`) — the mission/constitution prompt, read
-first and prepended to every phase prompt. Modeled on grounded-flow's
-`docker/builder/PROMPT.md`. It should contain:
+**6. Done.** The phase is appended to `state/phases-done` and the branch is
+pushed. With `COMMIT_REVIEWS=1` the latest verdict is also committed into the
+repository as `docs/verification/<phase>.md` first.
 
-- the mission and what "done" means for the product;
-- the binding engineering rules (test policy, lint gates, commit conventions,
-  forbidden patterns, mock-provider rules for AI code, …);
-- how to *verify* work (the exact commands), and the instruction to never
-  fake a green result — stop honestly with a blocker report instead.
+Why the reviewer is a separate process and not a subagent the builder spawns:
+a reviewer briefed by, and reporting to, the thing under review is not
+independent. In practice builders end their turn with "the gate is running in
+the background, I'll report when it finishes" — and the run ends. Here the
+builder's job is the work; deciding whether the work is done belongs to
+something that shares none of its context and cannot edit.
 
-Keep phase scoping **out** of it: the runner appends a per-phase trailer
-("execute ONLY the phase in `<file>`, stop when its DoD holds and the work is
-committed, do not push") automatically.
+### Cost
 
-**Phase plan files** (`PHASE_FILES`) — one file per phase, in execution
-order. Each should be a self-contained, executable slice: deliverables, steps,
-and an explicit **Definition of Done** the agent can check itself against.
-Phases should build on each other; the runner enforces the order.
+Roughly one reviewer run per phase on top of the build, and one builder + one
+reviewer run per fix round. From real runs: build phases cost $4–48 and take
+12–56 minutes; a read-only review pass costs a few dollars and a few minutes.
+`phase-runner status` shows the per-phase totals. `BUILD_BUDGET_USD` and
+`REVIEW_BUDGET_USD` cap a single run; hitting a cap is an honest stop, not a
+retry.
+
+---
+
+## Configuration — `.phase-runner/runner.env`
+
+All paths are relative to the project root. Phases are listed in
+`.phase-runner/phases` (one per line, `#` comments; `PHASE_FILES` in
+`runner.env` still works as a space-separated fallback).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ENTRY_FILE` | — (required) | Entry/constitution prompt, prepended to every builder, reviewer and report prompt. |
+| `GATE_CMD` | empty | Independent verification command run after every builder run. Empty = no gate. |
+| `PHASE_REVIEW` | `1` | Run the independent reviewer after every phase. `0` = gate only. |
+| `MAX_FIX_ROUNDS` | `2` | Fix rounds per phase before it is recorded as blocked. |
+| `COMMIT_REVIEWS` / `REVIEWS_DIR` | `0` / `docs/verification` | Also commit the latest verdict into the repository. |
+| `CLAUDE_MODEL`, `CLAUDE_EFFORT` | CLI default | Model/effort for every role. |
+| `BUILD_MODEL`, `BUILD_EFFORT` | ↑ | Override for the builder (and fix rounds). |
+| `REVIEW_MODEL`, `REVIEW_EFFORT` | ↑ | Override for the reviewer, preflight and final review — a stronger judge is cheap. |
+| `BUILD_BUDGET_USD`, `REVIEW_BUDGET_USD` | none | Hard spend cap per agent run. |
+| `RETRY_SCHEDULE` | `30 300 3600 10800` | Seconds before each retry after a transient failure. The list's length is the retry count. |
+| `STALL_TIMEOUT` | `1800` | Kill + retry an agent that printed nothing for this long. Keep above your slowest silent step. |
+| `PUSH`, `GIT_REMOTE`, `GIT_BRANCH` | `1`, `origin`, current | Push after every verified phase. |
+| `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | `Phase Runner` / `runner@phase.local` | Identity for runner commits. |
+| `EXTRA_APT_PACKAGES` | empty | Extra apt packages baked into the image. |
+| `CLAUDE_CODE_VERSION` | `latest` | Pin the Claude Code version in the image. |
+| `AGENT_HOME` | `.phase-runner/home` | Mounted as the agent's `~/.claude`: put `skills/`, `agents/`, plugins there. Sessions persist here too. |
+| `REVIEW_PROMPT` | built-in | The final review's instruction (entry file still prepended). |
+| `GUARD` | `1` | `0` disables the enforcement hook. Not recommended. |
+
+Credentials are resolved from `$PHASE_RUNNER_CREDENTIALS`, then
+`~/.config/claude-phase-runner/credentials.env`, then (with a warning) a
+legacy `credentials.env` in the kit directory. They are the agent's own
+secret store, deliberately outside the project, so the agent can manage the
+project's `.env` files without ever seeing its token.
+
+### The entry file and the phase files
+
+**The entry file** is read first and prepended to every prompt. Put in it: the
+mission and what "done" means for the product; the binding engineering rules
+(test policy, lint gates, commit conventions, forbidden patterns, mock rules
+for external services); the exact verification commands. Keep phase scoping
+out — the runner appends it. Do **not** ask the builder to spawn a
+verification subagent or write PASS files any more: the runner's reviewer does
+that, with a context the builder cannot influence, and self-issued verdicts
+are ignored.
+
+**Each phase file** is one self-contained slice: deliverables, steps, and an
+explicit **Definition of Done** the reviewer can check item by item. The
+better the DoD, the better the verdict: "all 37 ported tests pass, none
+skipped" is checkable; "the engine works" is not. If a phase has no explicit
+DoD the reviewer derives one from the deliverables and says so.
 
 **Networking note for verification steps:** the agent starts the project's
 stack as *sibling* containers (docker-out-of-docker), so their published
 ports live on the **host** — from inside the runner container they are
-reachable at `host.docker.internal:PORT`, **not** `127.0.0.1`. If your entry
-file tells the agent to curl its own services, say so (or have tests attach
-to the app's compose network, as grounded-flow's
-`test/helpers/rag-network.ts` does).
+reachable at `host.docker.internal:PORT`, not `127.0.0.1`. Say so in the entry
+file if the agent has to curl its own services.
 
-### 3. Configure the run
-
-```bash
-cp runner.env.example runner.env
-```
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `PROJECT_DIR` | — (required) | Absolute host path of the target repo. Mounted at the same path inside the container so the project's own compose bind mounts stay valid. |
-| `ENTRY_FILE` | — (required) | Entry prompt file, relative to the project root. |
-| `PHASE_FILES` | — (required) | Ordered, space-separated phase files, relative to the project root. One agent run per file. |
-| `RETRY_SCHEDULE` | `30 300 3600 10800` | Seconds to wait before each retry after a transient failure. **The list's length is the retry count** — the default is 4 retries: 30s, 5m, 1h, 3h. |
-| `STALL_TIMEOUT` | `1800` | Kill + retry the agent if it emits no output for this many seconds. Keep above your slowest silent step (one big docker build or test suite is a single tool call that prints nothing until it ends). |
-| `GATE_CMD` | empty | Optional independent verification command run from the project root after every phase (e.g. `pnpm lint && pnpm typecheck && pnpm test`). Empty = trust the agent's own checks. |
-| `PUSH` | `1` | Push after every phase. `0` disables pushing (commits still happen). |
-| `GIT_REMOTE` | `origin` | Remote to push to. |
-| `GIT_BRANCH` | current branch | Branch to push. |
-| `CLAUDE_MODEL` | CLI default | Model override passed to `claude --model`. |
-| `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | `Phase Runner` / `runner@phase.local` | Commit identity for runner checkpoint commits. |
-| `EXTRA_APT_PACKAGES` | empty | Extra apt packages baked into the image at build time (e.g. `"python3 python3-pip"` for non-JS stacks). |
-
-### 4. Dry run (always do this first)
-
-```bash
-DRY_RUN=1 bash run.sh
-```
-
-Validates the config on the host (paths exist, repo is git), builds the
-image, boots the container, re-validates inside, and prints the fully
-composed **first phase prompt** — exactly what the agent would receive — then
-exits without launching any agent. Read that prompt; if it says what you
-mean, you're ready.
-
-### 5. (Optional) Pre-flight tooling assessment
-
-```bash
-bash run.sh preflight                     # uses ./runner.env
-bash run.sh preflight path/to/other.env   # or an explicit config
-```
-
-Read `state/TOOLING.md`, provision what it recommends, then build. See
-[Pre-flight assessment](#pre-flight-tooling-assessment).
-
-### 6. Run
-
-```bash
-bash run.sh                     # uses ./runner.env
-bash run.sh path/to/other.env   # or an explicit config
-```
-
-Runs in the foreground (phases take hours — use `tmux`/`screen` for long
-sessions). `Ctrl-C` is safe at any time: everything committed so far is on
-the branch, and completed phases are recorded.
-
-### 7. (Optional) Review the finished project
-
-```bash
-bash run.sh review              # writes state/REVIEW.md, changes nothing
-```
-
-Read `state/REVIEW.md` and decide what to act on. See
-[Final review](#final-adversarial-review).
+**MCP servers, skills, plugins.** A project `.mcp.json` is picked up
+automatically (the project is trusted at boot). User-level skills and agents go
+into `.phase-runner/home/skills/` and `.phase-runner/home/agents/`.
 
 ---
 
-## What happens during a run
+## Enforcement — the guard hook
 
-Per phase file, in order:
+`docker/guard.sh` runs as a `PreToolUse` hook on every `Bash`, `Edit`, `Write`,
+`MultiEdit` and `NotebookEdit` call of every role (injected with `--settings`,
+so nothing is added to the project). A blocked call returns its reason to the
+model, which then routes around it instead of retrying blindly.
 
-1. **Prompt assembly** — entry file contents + the scope trailer for this
-   phase file.
-2. **Agent run** — `claude --dangerously-skip-permissions -p <prompt>
-   --output-format stream-json --verbose`, logged to
-   `state/logs/phase-<file>.log`. `stream-json` makes the log advance on
-   every agent event, which is what makes hang detection possible.
-3. **Retries** — see below.
-4. **Gates** — if `GATE_CMD` is set: run it; on failure the agent gets **one**
-   remediation run (with the gate output in its prompt), then the gates run
-   again; still red aborts the whole run. The agent's own claim of green is
-   never trusted when gates are configured.
-5. **Checkpoint commit** — anything the agent left uncommitted is committed
-   as `chore(runner): checkpoint uncommitted work after <phase>` so no work
-   is ever lost between phases.
-6. **Record + push** — the phase is appended to `state/phases-done` and the
-   branch is pushed (3 attempts, 30s apart).
+Every role: no `git push` (the runner pushes), no `reset --hard`, `clean -f`,
+`checkout .`, `branch -D`, rebase or other history rewriting, no `--no-verify`,
+no `sudo`, no `rm -rf` of root/home/`.git`, no `docker … prune` (the socket is
+the host's), no `curl | sh`, and **no modification of the entry file, the
+phase files or `.phase-runner/`** — through file tools or shell redirects.
+Reading them is fine.
 
-After the last phase, `state/SUMMARY.md` is written with the final `git log`.
+Read-only roles (reviewer, preflight, final review): additionally no edit
+tools at all, no git mutation of any kind, no publishing. After a read-only
+role finishes, a dirty working tree is reset to HEAD and logged.
 
-## Pre-flight tooling assessment
-
-```bash
-bash run.sh preflight
-```
-
-Before committing hours to an autonomous build, find out what the build will
-*need*. This pass reads the entry file and **every** phase plan, then writes a
-report to `state/TOOLING.md`: which Claude Code skills, MCP servers, plugins,
-apt packages, and external services/credentials each phase depends on, why, and
-exactly how to provision each one here. It touches nothing and then stops — no
-agent build, no commits.
-
-Why a separate pass instead of letting the build sort it out: the runner is
-**unattended**, so it cannot complete an OAuth handshake or paste a secret
-mid-build. Anything that needs credentials has to be in place *before* launch,
-or the phase that needs it stalls or fakes around it. Preflight surfaces those
-requirements while you can still act on them.
-
-**Using the findings — feed them back into config before you build:**
-
-- **Secrets / API keys / OAuth** → add to `credentials.env` (the agent's own
-  secret store), or configure the MCP server / plugin that needs them. This is
-  the item that *must* be done up front.
-- **System packages** (python, go, rust, image libs, …) → add to
-  `EXTRA_APT_PACKAGES` in `runner.env`; the image rebuilds on the next run.
-- **Skills / MCP servers / plugins** → make them available in the agent's
-  environment. Once present, Claude Code surfaces and invokes them on its own —
-  you generally don't need to name them in the phase prompts.
-- **Entry-file guidance** → if the assessment reveals a convention or tool the
-  agent should always prefer, fold a line into your `ENTRY_FILE` so every phase
-  inherits it.
-
-Then run the build (`bash run.sh`) with the environment it actually needs.
+The guard fails open on unparseable input and is covered by `tests/guard.sh`;
+add a case there for every new rule — an unverified guardrail is a decoration.
 
 ## Retries — "the API stopped responding"
 
-Two failure shapes are treated as **transient** and retried on the
-`RETRY_SCHEDULE`:
+Two failure shapes are treated as transient and retried on `RETRY_SCHEDULE`:
 
 - **Errored** — claude exits non-zero and the log tail matches transient
   patterns: HTTP 5xx / 429, `overloaded`, rate limit, connection
-  refused/reset, timeouts, `fetch failed`, `socket hang up`, …
-- **Hung** — no output for `STALL_TIMEOUT` seconds. A watchdog kills the
+  refused/reset, timeouts, `fetch failed`, `socket hang up`.
+- **Hung** — no output for `STALL_TIMEOUT` seconds. The watchdog kills the
   process and stamps the log with `RUNNER-STALL`.
 
-Retries resume the interrupted session with `--continue`, so in-flight
-context (what the agent was in the middle of) is preserved; if no session
-exists yet, the phase prompt is restarted from scratch. A false stall-kill is
-therefore cheap.
+Every run gets its own session id; a retry resumes exactly that session, so
+in-flight context is preserved and a false stall-kill is cheap. If the session
+cannot be resumed the role restarts from its prompt with a new id.
 
-**An honest agent stop is never retried.** If claude exits non-zero *without*
-transient markers — e.g. it hit an unreachable DoD and stopped with a blocker
-report, per the entry file's rules — the run aborts immediately with logs.
-Retrying an honest failure would just burn tokens re-asking a question that
-was already answered.
-
-When the schedule is exhausted, the run aborts; everything already committed
-is safe, and a later re-run resumes the phase.
+**An honest agent stop is never retried.** Non-zero without transient markers
+— an auth error, a budget cap, a CLI failure — aborts the run with the log
+path and a hint. A builder that *reports* `blocked` is not a failure at all:
+see above.
 
 ## Resume & crash recovery
 
-State lives in `state/` (bind-mounted, survives the container):
+State lives in `.phase-runner/state/` inside the project. Re-running
+`phase-runner build` after any interruption (crash, Ctrl-C, exhausted retries,
+a blocked phase you have since fixed):
 
-- `state/phases-done` — one line per completed phase file.
-- `state/logs/` — per-phase agent logs, gate logs, push log.
-- `state/SUMMARY.md` — success summary, or the failure reason on abort.
+1. pushes any commit backlog a previous run left behind,
+2. skips every phase listed in `state/phases-done`,
+3. restarts the first unfinished phase from its builder prompt on top of the
+   committed repository state.
 
-Re-running `bash run.sh` after any interruption (crash, `Ctrl-C`, power
-loss, exhausted retries):
+Phases are keyed by their manifest path — renaming a file makes it look new.
+`phase-runner reset` wipes the state; the repository keeps whatever was
+committed.
 
-1. pushes any commit backlog a previous run left behind (e.g. it died on the
-   push itself),
-2. skips every phase listed in `phases-done`,
-3. restarts the first unfinished phase from its prompt (the repo state — all
-   prior commits — is its starting point).
-
-**Fresh start**: `rm -rf state/`. The target repo keeps whatever was
-committed; reset the branch yourself if you want the code gone too.
-
-**Note**: phases are keyed by their file path — renaming a phase file makes
-it look new and it will run again.
-
-## Final adversarial review
+## Monitoring
 
 ```bash
-bash run.sh review
+phase-runner status            # per phase: done/BLOCKED/partial/pending, verdict, rounds, $, min
+phase-runner logs -f           # live transcript of the newest log
+phase-runner logs A.md.review  # newest log whose name contains that
+cat .phase-runner/state/reviews/<phase>.md
 ```
 
-Run this once the build is finished. One agent re-reads the entry file and,
-grounded in it, evaluates the whole delivered project — *what can be improved,
-simplified, made more resilient* — and writes a prioritized report to
-`state/REVIEW.md`. Each item states what, why it matters, its severity, and the
-concrete fix it would make.
+Logs are stream-json (`*.log`); a rendered transcript (`*.txt`) is written
+next to each when the role ends, and `logs` renders live with jq.
 
-It is **report-only by design**: it changes no code, config, docs, or git — not
-even small fixes. That keeps you in control. The review names problems; you
-decide which are worth acting on rather than having an unattended agent rewrite
-a project that just went green.
+## Preflight and final review
 
-**Using the review inside the build cycle:**
+Both are read-only passes run by the same machinery (fresh context, no edit
+tools, guard hook); the agent returns the report and the driver writes it.
 
-1. Run `bash run.sh review` after the build and read `state/REVIEW.md`.
-2. Pick the findings you accept (skip the ones you disagree with or defer).
-3. Turn each accepted finding into a **new phase plan file** — a self-contained
-   slice with its own Definition of Done, exactly like the original phases.
-4. Append those files to `PHASE_FILES` in `runner.env` and run `bash run.sh`
-   again. Resume skips the already-done phases and builds only the new ones,
-   each committed and pushed like any other phase.
-
-This closes the loop: build → review → hardening phases → build, with a human
-approving what enters the plan each time. Customize the review instruction with
-`REVIEW_PROMPT` in `runner.env` if you want a different lens (e.g. security- or
-performance-focused); the entry file is still prepended for grounding.
+- `phase-runner preflight` before a long build: which skills, MCP servers,
+  plugins, apt packages, and credentials each phase needs, and how to provision
+  each — secrets into the credentials file, packages into
+  `EXTRA_APT_PACKAGES`, skills into `.phase-runner/home/`, MCP servers into the
+  project's `.mcp.json`. The unattended runner cannot authenticate mid-build,
+  so anything needing a secret must be in place before launch.
+- `phase-runner review` after the build: a prioritized list of what to
+  improve, simplify or harden, each item with severity and the concrete fix,
+  written to `state/REVIEW.md`. Turn the findings you accept into new phase
+  files, append them to `.phase-runner/phases`, run `build` again — resume
+  skips the done phases. Customize the lens with `REVIEW_PROMPT`.
 
 ## Pushing
 
-The runner pushes the branch after every phase. Two auth options:
+The runner pushes after every verified phase (and after a blocked one, so the
+work is never only local). The agent itself cannot push — the guard blocks it.
 
-- **SSH remote** (`git@github.com:...`): start an agent and add your key
-  *before* launching — `eval $(ssh-agent); ssh-add` — the socket is
-  forwarded into the container (`SSH_AUTH_SOCK`). Host keys are accepted
-  automatically (`StrictHostKeyChecking=accept-new`) so an unattended run
-  never blocks on a prompt. `run.sh` warns if the remote is SSH and no agent
-  is running.
+- **SSH remote**: start an agent and add your key before launching
+  (`eval $(ssh-agent); ssh-add`); the socket is forwarded into the container
+  and host keys are accepted automatically. The CLI warns if the remote is SSH
+  and no agent is running.
 - **HTTPS remote with embedded token**
   (`https://x-access-token:<TOKEN>@github.com/you/repo.git`): needs nothing.
 
-Push failures retry 3× (30s apart) and then abort **without losing the phase
-record** — fix the auth and re-run; the backlog is pushed first.
-
-`PUSH=0` turns pushing off entirely (commits still happen locally).
-
-## Monitoring a run
-
-The driver's own progress lines (phase started, retrying in Ns, gates, push)
-print to your terminal. The agent's raw output is stream-json in
-`state/logs/`:
-
-```bash
-# what is the agent saying/doing right now?
-tail -f state/logs/phase-PHASE-2-PLAN.md.log \
-  | jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text'
-
-# every tool call as it happens
-tail -f state/logs/phase-PHASE-2-PLAN.md.log \
-  | jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name'
-```
+Push failures retry 3× and then abort without losing the phase record; fix
+the auth and re-run — the backlog is pushed first. `PUSH=0` disables pushing.
 
 ## Security model — read this once
 
 - The container is a sandbox **against accidents**, which is what makes
   `--dangerously-skip-permissions` acceptable: the agent cannot trash your
-  host filesystem or your shell config.
+  host filesystem or shell config.
 - It is **not** a hard boundary against a hostile agent: the mounted Docker
-  socket (`/var/run/docker.sock`) is effectively host-root, and outbound
-  network is fully open (the Claude API, registries, and `git push` need
-  it). If you need hard containment, remove the socket mount — and lose
-  docker-first verification.
-- Nothing is published inbound; no one can connect *to* the container.
-- Claude Code refuses to skip permissions as root, so `bootstrap.sh` starts
-  as root only to align the docker-socket group, then drops to the non-root
-  `node` user (uid 1000 — matches the typical host repo owner, so file
-  ownership stays sane).
+  socket is effectively host-root and outbound network is open (the API,
+  registries and `git push` need it). The guard hook narrows what a *careless*
+  agent can do; it is not a security boundary either. If you need hard
+  containment, remove the socket mount and lose docker-first verification.
+- Nothing is published inbound.
+- Claude Code refuses to skip permissions as root, so `bootstrap.sh` starts as
+  root only to align the docker-socket group and drops to the non-root `node`
+  user (uid 1000, so file ownership matches the typical host user).
+- The agent's credentials are environment variables in the container; the
+  project never sees the file.
 
 ## Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
-| `ERROR: no credentials` at boot | `credentials.env` missing or empty — set `CLAUDE_CODE_OAUTH_TOKEN` **or** `ANTHROPIC_API_KEY`. |
-| `push failed 3 times` | No SSH agent forwarded / bad token in remote URL. Fix auth, re-run — the commit backlog pushes first. |
-| Phase killed as stalled during a long docker build / test suite | Raise `STALL_TIMEOUT` above your slowest silent step. The retry `--continue`s the session, so little is lost. |
-| Agent can't reach its own services on `127.0.0.1` | DooD: published ports live on the host. Use `host.docker.internal:PORT` (mapped via `extra_hosts`), or attach test containers to the app's compose network. |
-| `still red after remediation` | The gate genuinely fails. Read `state/logs/gates-*.log`, fix or relax `GATE_CMD`, re-run — the phase restarts. |
-| A completed phase runs again | Its file was renamed (resume is keyed by path), or `state/` was deleted. |
-| Docker socket warnings at boot | `/var/run/docker.sock` not mounted or not accessible — docker-first verification is disabled but the run continues. |
-| Need python/go/rust in the image | `EXTRA_APT_PACKAGES="python3 python3-pip"` in `runner.env`, then re-run (the image rebuilds). |
+| `no credentials file` | Create `~/.config/claude-phase-runner/credentials.env` from the template with exactly one of `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`. |
+| `no config at .phase-runner/runner.env` | Run `phase-runner init` in the project, or pass `--project DIR`. |
+| Phase BLOCKED after fix rounds | Read `state/reviews/<phase>.md`. Fix the plan or the code yourself, or raise `MAX_FIX_ROUNDS`, then re-run: the phase restarts from its prompt on the committed state. |
+| Builder reported blocked | Read `state/reviews/<phase>.blocked.md`; it names what it needs. Provide it (credentials, a decision, a package), re-run. |
+| `push failed 3 times` | No SSH agent forwarded / bad token in the remote URL. Fix, re-run — the backlog pushes first. |
+| Killed as stalled during a long docker build / test suite | Raise `STALL_TIMEOUT`. The retry resumes the same session, so little is lost. |
+| Agent can't reach its own services on `127.0.0.1` | DooD: use `host.docker.internal:PORT`, or attach test containers to the app's compose network. |
+| `guard … BLOCKED` lines in the transcript | Working as intended. If a legitimate command is caught, add a narrower rule + a test case in `tests/guard.sh`. |
+| A completed phase runs again | Its manifest path changed, or the state was reset. |
+| Need python/go/rust in the image | `EXTRA_APT_PACKAGES="python3 python3-pip"` in `runner.env`; the image rebuilds on the next run. |
+| Reviewer verdicts feel shallow | Sharpen the phase's Definition of Done and set `REVIEW_MODEL`/`REVIEW_EFFORT` higher than the builder's. |
 
-## Iterating on the kit itself
+## Iterating on the kit
 
-`docker/driver.sh` is bind-mounted over the baked copy, so driver changes
-take effect on the next `run.sh` **without** an image rebuild. Changes to
-`docker/Dockerfile` or `docker/bootstrap.sh` need a rebuild — `run.sh` always
-runs `docker compose build`, which is a no-op cache hit when nothing changed.
+`docker/` and `prompts/` are bind-mounted over the baked copies, so driver,
+library, guard and prompt edits take effect on the next run without a rebuild.
+`docker/Dockerfile` changes rebuild automatically (a cache hit when nothing
+changed).
 
-The driver can also be exercised without Docker or tokens (this is how it was
-tested): point `PATH` at a fake `claude` binary and run it directly —
-`RUNNER_STATE=/tmp/state PROJECT_DIR=... ENTRY_FILE=... PHASE_FILES=... bash
-docker/driver.sh`.
+Tests need no Docker and no token: `bash tests/run.sh` runs a fake `claude`
+(`tests/bin/claude`) through every scenario — happy path, reviewer FAIL → fix
+→ PASS, exhausted rounds, red gate, transient retry with session resume,
+stall, no-session restart, blocked builder, resume, dry run, two phases,
+committed verdicts, reviewer leaving files, uncommitted leftovers, preflight,
+final review, the host CLI — plus every guard rule. Add a scenario with each
+behaviour change.
+
+## Migrating from the old layout (kit-local `runner.env` + `state/`)
+
+1. In each target project: `phase-runner init`, then move the old
+   `runner.env` values into `.phase-runner/runner.env` (drop `PROJECT_DIR`;
+   `PHASE_FILES` still works, but the `phases` manifest is nicer) and the phase
+   list into `.phase-runner/phases`.
+2. Move that project's `state/` contents into `.phase-runner/state/`
+   (`phases-done`, `logs/`, `SUMMARY.md`, …). Old per-project state that was
+   mixed in one kit `state/` directory must be split by project — the
+   `phases-done` paths tell you which is which.
+3. Move `credentials.env` to `~/.config/claude-phase-runner/credentials.env`.
+4. Remove the "spawn a verification subagent" instructions from your entry
+   files; the runner's reviewer replaces them.

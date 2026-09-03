@@ -1,308 +1,299 @@
 #!/usr/bin/env bash
-# Phase driver (runs as `node` inside the runner container).
+# Phase driver (runs as `node` inside the runner container; also runnable on the
+# host for tests with a fake `claude` on PATH — see tests/run.sh).
 #
-# For each phase file, in order: launch one Claude Code run scoped to exactly
-# that phase, then (optionally) run independent gates, then ensure the work is
-# committed and push it. Completed phases are recorded in /state/phases-done,
-# so a crashed or interrupted run resumes where it left off.
+# Modes (RUNNER_MODE):
+#   build      for each pending phase: BUILDER → checkpoint → GATE → REVIEWER →
+#              (fix rounds, capped) → record done → push. Resumes after a crash.
+#   dry-run    validate, print the first pending phase's builder prompt, exit.
+#   preflight  read-only tooling assessment → state/TOOLING.md
+#   review     read-only adversarial review of the built project → state/REVIEW.md
 #
-# Retry policy — "the API stopped responding", two detectable shapes:
-#   1. claude exits non-zero and the log tail looks like a transient
-#      API/network error (5xx, 429, overloaded, connection reset, …).
-#   2. claude produces NO output for STALL_TIMEOUT seconds (a true hang) —
-#      a watchdog kills it and marks the log.
-# Both retry on the escalating RETRY_SCHEDULE (e.g. 30s → 5m → 1h → 3h);
-# the schedule's length IS the retry count. Retries resume the interrupted
-# session with --continue so in-flight phase context is not lost; an honest
-# agent stop (clean non-transient failure) is NEVER retried into submission.
+# Separation of powers: the builder never verifies its own work. A reviewer
+# with a fresh context and no edit tools audits every DoD item against the
+# repository and the diff and returns a structured verdict; the builder only
+# comes back (fresh context again) to fix what the reviewer or the gate found.
 set -uo pipefail
 
-cd "${PROJECT_DIR:?PROJECT_DIR is not set}"
+RUNNER_HOME="${PHASE_RUNNER_HOME:-/opt/phase-runner}"
+cd "${PROJECT_DIR:?PROJECT_DIR is not set}" || exit 1
 
-STATE="${RUNNER_STATE:-/state}"
-DONE_FILE="$STATE/phases-done"
+STATE="${RUNNER_STATE:-$PROJECT_DIR/.phase-runner/state}"
 LOGS="$STATE/logs"
-mkdir -p "$LOGS"
+REVIEWS="$STATE/reviews"
+DONE_FILE="$STATE/phases-done"
+RUNS_FILE="$STATE/runs.tsv"
+BLOCKED_FILE="$STATE/blocked"
+mkdir -p "$LOGS" "$REVIEWS"
 touch "$DONE_FILE"
 
-read -r -a SCHEDULE <<< "${RETRY_SCHEDULE:-30 300 3600 10800}"
-read -r -a PHASES <<< "${PHASE_FILES:?PHASE_FILES is not set (ordered, space-separated phase plan files)}"
+# shellcheck source=lib/common.sh
+source "$RUNNER_HOME/docker/lib/common.sh"
+# shellcheck source=lib/claude.sh
+source "$RUNNER_HOME/docker/lib/claude.sh"
+# shellcheck source=lib/git.sh
+source "$RUNNER_HOME/docker/lib/git.sh"
+
+MODE="${RUNNER_MODE:-build}"
+read -r -a PHASES <<< "${PHASE_FILES:?PHASE_FILES is not set (ordered phase plan files)}"
 ENTRY_FILE="${ENTRY_FILE:?ENTRY_FILE is not set (the entry/constitution prompt file)}"
-STALL_TIMEOUT="${STALL_TIMEOUT:-1800}"
 GIT_REMOTE="${GIT_REMOTE:-origin}"
 GIT_BRANCH="${GIT_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
 PUSH="${PUSH:-1}"
 GATE_CMD="${GATE_CMD:-}"
-PREFLIGHT="${PREFLIGHT:-0}"
-REVIEW="${REVIEW:-0}"
-
-log() { printf '\n\033[1;34m▶ %s\033[0m\n' "$*"; }
-die() {
-  printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2
-  {
-    echo "FAILED: $*"
-    echo "completed phases: $(tr '\n' ' ' < "$DONE_FILE")"
-    echo "logs: state/logs/ — re-run to resume from the first unfinished phase"
-  } > "$STATE/SUMMARY.md" 2>/dev/null
-  exit 1
-}
+PHASE_REVIEW="${PHASE_REVIEW:-1}"
+MAX_FIX_ROUNDS="${MAX_FIX_ROUNDS:-2}"
+COMMIT_REVIEWS="${COMMIT_REVIEWS:-0}"
+REVIEWS_DIR="${REVIEWS_DIR:-docs/verification}"
 
 [[ -f "$ENTRY_FILE" ]] || die "entry file not found: $ENTRY_FILE (path is relative to the project root)"
 for p in "${PHASES[@]}"; do
   [[ -f "$p" ]] || die "phase file not found: $p (paths are relative to the project root)"
 done
 
+# Paths the agent may read but never modify (enforced by docker/guard.sh).
+PROTECTED_PATHS="$ENTRY_FILE:$(IFS=:; printf '%s' "${PHASES[*]}"):.phase-runner"
+ensure_exclude
+
 phase_done() { grep -qxF "$1" "$DONE_FILE"; }
-phase_slug() { basename "$1" | tr -cd 'A-Za-z0-9._-'; }
+onoff() { [[ "$1" == "1" ]] && echo on || echo off; }
 
-# ── Claude launch with stall watchdog ─────────────────────────────────────────
-# stream-json keeps the log moving on every agent event, which is what lets the
-# watchdog distinguish "thinking about a long build" from "API went dark".
-run_claude() {
-  local logfile="$1" prompt="$2" mode="$3" rc
-  local args=(--dangerously-skip-permissions --output-format stream-json --verbose)
-  [[ -n "${CLAUDE_MODEL:-}" ]] && args+=(--model "$CLAUDE_MODEL")
-  [[ "$mode" == "continue" ]] && args+=(--continue)
+# ── Prompts ───────────────────────────────────────────────────────────────────
+entry_text() { cat "$ENTRY_FILE"; }
+rules_text() { render_prompt rules ENTRY_FILE="$ENTRY_FILE"; }
 
-  claude "${args[@]}" -p "$prompt" >>"$logfile" 2>&1 &
-  local pid=$!
-
-  (
-    while kill -0 "$pid" 2>/dev/null; do
-      sleep 30
-      local age=$(( $(date +%s) - $(stat -c %Y "$logfile" 2>/dev/null || date +%s) ))
-      if (( age > STALL_TIMEOUT )); then
-        echo "RUNNER-STALL: no agent output for ${age}s (limit ${STALL_TIMEOUT}s) — killing" >>"$logfile"
-        kill "$pid" 2>/dev/null
-        break
-      fi
-    done
-  ) &
-  local watchdog=$!
-
-  wait "$pid"; rc=$?
-  kill "$watchdog" 2>/dev/null
-  wait "$watchdog" 2>/dev/null
-  return "$rc"
+build_prompt() {  # build_prompt PHASE
+  render_prompt build ENTRY="$(entry_text)" PHASE_FILE="$1" RULES="$(rules_text)"
 }
 
-is_transient() {
-  tail -8 "$1" | grep -qiE \
-    'RUNNER-STALL|unable to connect|connection ?refused|connection ?reset|econnreset|econnrefused|etimedout|fetch failed|socket hang up|network error|overloaded|rate.?limit|api error.*(5[0-9][0-9]|429)|(5[0-9][0-9]|429).*api error'
+fix_prompt() {  # fix_prompt PHASE ROUND DIFF_RANGE REASON
+  render_prompt fix ENTRY="$(entry_text)" PHASE_FILE="$1" ROUND="$2" MAX_ROUNDS="$MAX_FIX_ROUNDS" \
+    DIFF_RANGE="$3" REASON="$4" RULES="$(rules_text)"
 }
 
-no_session() {
-  tail -8 "$1" | grep -qiE 'no conversation (found|to continue)'
+review_prompt() {  # review_prompt PHASE BASE GATE_LOG
+  local commits diffstat gate_out
+  commits="$(git log --oneline "$2..HEAD" 2>/dev/null)"
+  [[ -n "$commits" ]] || commits="(no commits — the builder committed nothing in this phase)"
+  diffstat="$(git diff --stat "$2..HEAD" 2>/dev/null | tail -40)"
+  [[ -n "$diffstat" ]] || diffstat="(empty diff)"
+  if [[ -n "$3" && -f "$3" ]]; then gate_out="$(tail -40 "$3")"; else gate_out="(no gate command configured — run the project's own checks yourself)"; fi
+  render_prompt review ENTRY="$(entry_text)" PHASE_FILE="$1" DIFF_RANGE="${2:0:12}..HEAD" \
+    COMMITS="$commits" DIFFSTAT="$diffstat" GATE_CMD="${GATE_CMD:-<none configured>}" GATE_OUTPUT="$gate_out"
 }
 
-# ── Retry loop around one agent objective ─────────────────────────────────────
-run_agent() {
-  local logfile="$1" prompt="$2"
-  local max_attempts=$(( ${#SCHEDULE[@]} + 1 ))
-  local attempt rc
+preflight_prompt() {
+  render_prompt preflight ENTRY="$(entry_text)" PHASE_LIST="$(printf '  - %s\n' "${PHASES[@]}")"
+}
 
-  for (( attempt=1; attempt<=max_attempts; attempt++ )); do
-    if (( attempt == 1 )); then
-      run_claude "$logfile" "$prompt" fresh
-      rc=$?
-    else
-      log "Retry $((attempt-1))/${#SCHEDULE[@]}: resuming interrupted session (--continue)"
-      run_claude "$logfile" \
-        "The previous run was interrupted by an API failure. Inspect the repo state and continue the same phase from where it stopped. The original instructions still apply in full." \
-        continue
-      rc=$?
-      if (( rc != 0 )) && no_session "$logfile"; then
-        log "No session to continue — restarting the phase prompt from scratch"
-        run_claude "$logfile" "$prompt" fresh
-        rc=$?
-      fi
-    fi
-    (( rc == 0 )) && return 0
+final_review_prompt() {
+  local body="${REVIEW_PROMPT:-Make an adversarial evaluation of what can be improved, simplified, and made more resilient. Do it thoroughly.}"
+  render_prompt final-review ENTRY="$(entry_text)" REVIEW_BODY="$body" PHASE_LIST="$(printf '  - %s\n' "${PHASES[@]}")"
+}
 
-    if (( attempt < max_attempts )) && is_transient "$logfile"; then
-      local delay="${SCHEDULE[$((attempt-1))]}"
-      log "Transient API failure (attempt $attempt/$max_attempts, rc=$rc) — retrying in ${delay}s"
-      sleep "$delay"
-      continue
-    fi
-    return "$rc"
-  done
+# ── Roles ─────────────────────────────────────────────────────────────────────
+# run_builder PHASE ROLE ROUND LOGFILE PROMPT → 0 done, 1 blocked; dies on infra failure
+run_builder() {
+  local phase="$1" role="$2" round="$3" logfile="$4" prompt="$5"
+  local t0 rc status summary
+  t0=$(date +%s)
+  run_agent "$logfile" "$role" "$prompt"; rc=$?
+  render_log "$logfile"
+  BUILDER_JSON="$(structured_output "$logfile")"
+  status="$(jq -r '.status // "unknown"' <<<"${BUILDER_JSON:-null}" 2>/dev/null)"
+  (( rc == 0 )) || status="error"
+  record_run "$phase" "$role" "$round" "$status" "$logfile" "$(jq -r '.summary // ""' <<<"${BUILDER_JSON:-null}" 2>/dev/null | head -c 200)" $(( $(date +%s) - t0 ))
+  (( rc == 0 )) || die "$role failed in phase $phase (rc=$rc; $(failure_hint "$logfile") — log: $(rel "$logfile"))"
+  checkpoint_commit "chore(runner): checkpoint uncommitted work after $(basename "$phase")"
+  if [[ "$status" == "blocked" ]]; then
+    summary="$(jq -r '.summary // ""' <<<"$BUILDER_JSON")"
+    {
+      echo "# $(basename "$phase") — builder reported BLOCKED ($(date -u +%FT%TZ))"
+      echo
+      echo "$summary"
+      echo
+      echo "## Blockers"
+      echo
+      jq -r '.blockers // "(none given)"' <<<"$BUILDER_JSON"
+    } > "$REVIEWS/$(phase_slug "$phase").blocked.md"
+    return 1
+  fi
+  [[ "$status" == "done" ]] || warn "$role returned no structured report (status=$status) — proceeding to gate and review"
+  return 0
+}
+
+# run_gate PHASE SLUG ROUND → 0 green / 1 red; sets GATE_LOG
+run_gate() {
+  GATE_LOG=""
+  [[ -n "$GATE_CMD" ]] || return 0
+  GATE_LOG="$LOGS/$2.gate.r$3.log"
+  local t0; t0=$(date +%s)
+  log "Gate (round $3): $GATE_CMD"
+  if bash -c "$GATE_CMD" >"$GATE_LOG" 2>&1; then
+    record_run "$1" gate "$3" green "" "" $(( $(date +%s) - t0 ))
+    log "Gate GREEN"
+    return 0
+  fi
+  record_run "$1" gate "$3" red "" "see $(rel "$GATE_LOG")" $(( $(date +%s) - t0 ))
+  warn "Gate RED (log: $(rel "$GATE_LOG"))"
   return 1
 }
 
-# ── Commit + push ─────────────────────────────────────────────────────────────
-checkpoint_commit() {
-  local phase_file="$1"
-  git add -A
-  if ! git diff --cached --quiet; then
-    # The agent should have committed itself; this makes sure nothing in-flight
-    # is ever lost between phases.
-    git commit -m "chore(runner): checkpoint uncommitted work after $(basename "$phase_file")" \
-      || die "checkpoint commit failed"
-    log "Checkpoint commit created for leftover working-tree changes"
+# run_review PHASE SLUG BASE ROUND → sets VERDICT (PASS|FAIL) and VERDICT_MD; dies on infra failure
+run_review() {
+  local phase="$1" slug="$2" base="$3" round="$4"
+  local logfile="$LOGS/$slug.review.r$round.log" t0 rc json jf mf counts
+  t0=$(date +%s)
+  log "Reviewer (round $round): fresh read-only context (log: $(rel "$logfile"))"
+  run_agent "$logfile" review "$(review_prompt "$phase" "$base" "${GATE_LOG:-}")"; rc=$?
+  render_log "$logfile"
+  restore_tree "The reviewer"
+  json="$(structured_output "$logfile")"
+  if (( rc != 0 )) || [[ -z "$json" ]]; then
+    record_run "$phase" review "$round" error "$logfile" "rc=$rc, no verdict" $(( $(date +%s) - t0 ))
+    die "reviewer failed in phase $phase (rc=$rc; $(failure_hint "$logfile") — log: $(rel "$logfile"))"
   fi
+  VERDICT="$(jq -r '.verdict' <<<"$json")"
+  jf="$REVIEWS/$slug.r$round.json"; mf="$REVIEWS/$slug.r$round.md"
+  jq . <<<"$json" > "$jf"
+  jq -r --arg phase "$phase" --arg round "$round" --arg when "$(date -u +%FT%TZ)" -f "$LIB_DIR/verdict.jq" "$jf" > "$mf"
+  cp "$jf" "$REVIEWS/$slug.json"; cp "$mf" "$REVIEWS/$slug.md"
+  VERDICT_MD="$mf"
+  counts="$(jq -r '[.findings[]? | .severity] | group_by(.) | map("\(.[0]) \(length)") | join(", ")' <<<"$json")"
+  record_run "$phase" review "$round" "$VERDICT" "$logfile" "${counts:-no findings}" $(( $(date +%s) - t0 ))
+  log "Reviewer verdict: $VERDICT ${counts:+($counts)} — $(rel "$mf")"
 }
 
-push_branch() {
-  [[ "$PUSH" == "1" ]] || { log "PUSH=0 — skipping push"; return 0; }
-  local try
-  for try in 1 2 3; do
-    if git push -u "$GIT_REMOTE" "$GIT_BRANCH" >>"$LOGS/push.log" 2>&1; then
-      log "Pushed $GIT_BRANCH to $GIT_REMOTE"
-      return 0
+# COMMIT_REVIEWS=1: keep the latest verdict in the repository as well.
+publish_review() {  # publish_review SLUG
+  [[ "$COMMIT_REVIEWS" == "1" && -f "$REVIEWS/$1.md" ]] || return 0
+  mkdir -p "$REVIEWS_DIR"
+  cp "$REVIEWS/$1.md" "$REVIEWS_DIR/$1.md"
+  git add "$REVIEWS_DIR/$1.md"
+  git diff --cached --quiet || git commit -q -m "docs(verification): $1 — ${VERDICT:-review}"
+}
+
+# mark_blocked PHASE REASON — records, keeps the work safe (checkpoint + push), stops the run.
+mark_blocked() {
+  local phase="$1" reason="$2"
+  { grep -vF "$phase"$'\t' "$BLOCKED_FILE" 2>/dev/null || true; } > "$BLOCKED_FILE.tmp"
+  printf '%s\t%s\n' "$phase" "$(printf '%s' "$reason" | tr '\t\n' '  ')" >> "$BLOCKED_FILE.tmp"
+  mv "$BLOCKED_FILE.tmp" "$BLOCKED_FILE"
+  checkpoint_commit "chore(runner): checkpoint work after blocked $(basename "$phase")"
+  push_branch || warn "push failed — the work is committed locally; fix credentials and re-run"
+  die "phase $phase BLOCKED — $reason"
+}
+
+unblock() {
+  [[ -f "$BLOCKED_FILE" ]] || return 0
+  { grep -vF "$1"$'\t' "$BLOCKED_FILE" || true; } > "$BLOCKED_FILE.tmp"
+  mv "$BLOCKED_FILE.tmp" "$BLOCKED_FILE"
+}
+
+# ── One phase ─────────────────────────────────────────────────────────────────
+run_phase() {
+  local phase="$1" slug base round=0 reason logfile
+  slug="$(phase_slug "$phase")"
+  base="$(git rev-parse HEAD)"
+  VERDICT=""; VERDICT_MD=""
+
+  logfile="$LOGS/$slug.build.log"
+  log "Phase $phase: BUILDER starting (log: $(rel "$logfile"))"
+  run_builder "$phase" build 0 "$logfile" "$(build_prompt "$phase")" \
+    || mark_blocked "$phase" "builder reported blocked: $(jq -r '.summary // ""' <<<"$BUILDER_JSON" | head -c 300) — see $(rel "$REVIEWS")/$slug.blocked.md"
+
+  while :; do
+    if ! run_gate "$phase" "$slug" "$round"; then
+      reason="The runner's independent gate command FAILED:"$'\n\n'"    $GATE_CMD"$'\n\n'"Last 60 lines of its output:"$'\n\n'"$(tail -60 "$GATE_LOG")"
+    elif [[ "$PHASE_REVIEW" == "1" ]]; then
+      run_review "$phase" "$slug" "$base" "$round"
+      [[ "$VERDICT" == "PASS" ]] && break
+      reason="The independent reviewer returned FAIL. Its verdict (also at $(rel "$VERDICT_MD")):"$'\n\n'"$(cat "$VERDICT_MD")"
+    else
+      break
     fi
-    log "Push failed (attempt $try/3) — retrying in 30s"
-    sleep 30
+
+    round=$(( round + 1 ))
+    if (( round > MAX_FIX_ROUNDS )); then
+      publish_review "$slug"
+      mark_blocked "$phase" "still failing after $MAX_FIX_ROUNDS fix round(s) (last: ${VERDICT:-gate red}) — see $(rel "$REVIEWS")/$slug.md"
+    fi
+    logfile="$LOGS/$slug.fix.r$round.log"
+    log "Phase $phase: FIX round $round/$MAX_FIX_ROUNDS — builder with a fresh context (log: $(rel "$logfile"))"
+    run_builder "$phase" fix "$round" "$logfile" "$(fix_prompt "$phase" "$round" "${base:0:12}..HEAD" "$reason")" \
+      || mark_blocked "$phase" "builder reported blocked in fix round $round: $(jq -r '.summary // ""' <<<"$BUILDER_JSON" | head -c 300)"
   done
-  die "push to $GIT_REMOTE/$GIT_BRANCH failed 3 times (state/logs/push.log) — completed phases stay recorded; fix credentials and re-run to push the backlog"
+
+  publish_review "$slug"
+  unblock "$phase"
+  echo "$phase" >> "$DONE_FILE"
+  push_branch || die "push to $GIT_REMOTE/$GIT_BRANCH failed 3 times (logs/push.log) — the phase is recorded as done; fix credentials and re-run to push the backlog"
+  log "Phase $phase: DONE — verified${GATE_CMD:+, gate green}, committed, pushed"
 }
 
-# ── Prompts ───────────────────────────────────────────────────────────────────
-preflight_prompt() {
-  cat <<EOF
-$(cat "$ENTRY_FILE")
-
-The phase plan for this project, in execution order:
-$(for p in "${PHASES[@]}"; do echo "  - $p"; done)
-
-PRE-FLIGHT TOOLING ASSESSMENT — this runs BEFORE any building. Read the entry
-prompt above and every phase file listed, then assess what TOOLING would make
-this build faster and more reliable: Claude Code skills, MCP servers, plugins,
-system/apt packages, and external services or credentials the phases will need.
-
-For each recommendation state: what it is, which phase(s) need it, why, and
-exactly how the human provisions it here (add a secret to credentials.env, add a
-package to EXTRA_APT_PACKAGES, mount a skill/plugin, configure an MCP server,
-etc.). Flag anything requiring secrets or OAuth up front — the unattended runner
-cannot authenticate mid-build, so those must be in place before launch.
-
-This is a REPORT-ONLY pass. Do NOT modify the project in any way. Write ONLY the
-report, to the absolute path ${STATE}/TOOLING.md. Do not commit and do not push.
-EOF
-}
-
-phase_prompt() {
-  cat <<EOF
-$(cat "$ENTRY_FILE")
-
-CURRENT SCOPE — this run must execute exactly ONE phase.
-Read ${1} fully and execute only that phase, honoring everything above.
-Stop when that phase's Definition of Done holds and all work is committed with
-conventional-commit messages. Do not start any other phase. Do not push — the
-runner pushes after every phase. If the DoD is unreachable, stop honestly with
-a clear blocker report (what failed, what you tried, what is needed); never
-fake a green result.
-EOF
-}
-
-remediation_prompt() {
-  cat <<EOF
-You are the same agent, in the same repository. The phase defined in ${1} was
-executed, but the runner's independent gate command FAILED afterwards:
-
-  $GATE_CMD
-
-Last 60 lines of gate output:
-
-$(tail -60 "$LOGS/gates-$(phase_slug "$1").log")
-
-Re-read ${1}, fix forward until the gate command passes, and commit the fix.
-Do not fake green.
-EOF
-}
-
-review_prompt() {
-  # Overridable in one place: set REVIEW_PROMPT to replace the wording below.
-  # The entry/constitution file is still prepended for grounding.
-  local body="${REVIEW_PROMPT:-Now make an adversarial evaluation on what can be improved, simplified, made more resilient. Do it thoroughly.}"
-  cat <<EOF
-$(cat "$ENTRY_FILE")
-
-FINAL ADVERSARIAL REVIEW — every planned phase is complete and committed.
-$body
-
-This is a REPORT-ONLY pass. Do NOT change the project in any way — not code,
-config, docs, or git. Not even small fixes. Every improvement, however safe it
-looks, goes into the report as a recommendation for the human to approve later.
-Write ONLY the report, to the absolute path ${STATE}/REVIEW.md: a prioritized
-list where each item states what, why it matters, severity, and the concrete
-fix you would make. Do not commit and do not push.
-EOF
+# ── Report-only passes ────────────────────────────────────────────────────────
+# report_pass ROLE OUTFILE PROMPT — the agent returns Markdown; the driver writes it.
+report_pass() {
+  local role="$1" out="$2" prompt="$3" logfile="$LOGS/$1.log" t0 rc json
+  t0=$(date +%s)
+  log "$role: launching read-only agent (log: $(rel "$logfile"))"
+  run_agent "$logfile" "$role" "$prompt"; rc=$?
+  render_log "$logfile"
+  restore_tree "The $role agent"
+  json="$(structured_output "$logfile")"
+  if (( rc != 0 )) || [[ -z "$json" ]]; then
+    record_run "-" "$role" 0 error "$logfile" "rc=$rc" $(( $(date +%s) - t0 ))
+    die "$role agent failed (rc=$rc; $(failure_hint "$logfile") — log: $(rel "$logfile"))"
+  fi
+  jq -r '.report' <<<"$json" > "$out"
+  record_run "-" "$role" 0 ok "$logfile" "wrote $(rel "$out")" $(( $(date +%s) - t0 ))
+  log "$role report written to $(rel "$out")"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-log "Phase runner starting in $PROJECT_DIR (branch: $GIT_BRANCH, remote: $GIT_REMOTE)"
+log "Phase runner ($MODE) in $PROJECT_DIR — branch $GIT_BRANCH, remote $GIT_REMOTE"
 log "Phases: ${PHASES[*]}"
-log "Retry schedule: ${SCHEDULE[*]}s; stall timeout: ${STALL_TIMEOUT}s"
+log "Builder: model ${BUILD_MODEL:-${CLAUDE_MODEL:-default}}${BUILD_EFFORT:+, effort $BUILD_EFFORT}${BUILD_BUDGET_USD:+, budget \$$BUILD_BUDGET_USD} · Reviewer: $(onoff "$PHASE_REVIEW"), model ${REVIEW_MODEL:-${CLAUDE_MODEL:-default}}${REVIEW_EFFORT:+, effort $REVIEW_EFFORT}${REVIEW_BUDGET_USD:+, budget \$$REVIEW_BUDGET_USD} · fix rounds ≤ $MAX_FIX_ROUNDS · gate: ${GATE_CMD:-none}"
+log "Retry schedule: ${SCHEDULE[*]}s; stall timeout: ${STALL_TIMEOUT}s; guard hook: $(onoff "$GUARD")"
 
-if [[ -n "${DRY_RUN:-}" ]]; then
-  log "DRY RUN: config parsed, entry + phase files exist. First phase prompt follows."
-  phase_prompt "${PHASES[0]}"
-  exit 0
-fi
+case "$MODE" in
+  dry-run)
+    for p in "${PHASES[@]}"; do
+      phase_done "$p" && { log "Phase $p: already done — would skip"; continue; }
+      log "DRY RUN — the builder prompt for the first pending phase ($p) follows. No agent is launched."
+      echo
+      build_prompt "$p"
+      exit 0
+    done
+    log "DRY RUN — every phase is already done; nothing would run."
+    exit 0
+    ;;
+  preflight)
+    report_pass preflight "$STATE/TOOLING.md" "$(preflight_prompt)"
+    log "Read $(rel "$STATE")/TOOLING.md, provision what it recommends, then run the build."
+    exit 0
+    ;;
+  review)
+    report_pass final-review "$STATE/REVIEW.md" "$(final_review_prompt)"
+    log "Read $(rel "$STATE")/REVIEW.md and turn the findings you accept into new phase files."
+    exit 0
+    ;;
+  build) ;;
+  *) die "unknown RUNNER_MODE: $MODE" ;;
+esac
 
-# ── Pre-flight tooling assessment (standalone; stops before building) ─────────
-# Read the plan and report what skills/MCP/plugins/packages/creds to provision.
-# Report-only and never touches the project or git: you read state/TOOLING.md,
-# provision, then set PREFLIGHT=0 and re-run to actually build.
-if [[ "$PREFLIGHT" == "1" ]]; then
-  log "Pre-flight tooling assessment: launching agent (log: state/logs/preflight.log)"
-  run_agent "$LOGS/preflight.log" "$(preflight_prompt)" \
-    || die "pre-flight assessment agent failed (state/logs/preflight.log)"
-  log "Assessment written to state/TOOLING.md — review it, provision tooling, then re-run to build."
-  exit 0
-fi
-
-# ── Final adversarial review (standalone; report-only) ────────────────────────
-# Run after the build (`run.sh review`): evaluate the finished project and write
-# a prioritized report. Changes nothing — you read state/REVIEW.md and give the
-# green light for improvements yourself.
-if [[ "$REVIEW" == "1" ]]; then
-  log "Final adversarial review: launching agent (log: state/logs/review.log)"
-  run_agent "$LOGS/review.log" "$(review_prompt)" \
-    || die "final adversarial review agent failed (state/logs/review.log)"
-  log "Review written to state/REVIEW.md — read it, then give the green light for improvements."
-  exit 0
-fi
-
-# Push any backlog a previous run left behind (e.g. it died on push).
-if [[ "$PUSH" == "1" ]] && [[ -n "$(git log --oneline "$GIT_REMOTE/$GIT_BRANCH..HEAD" 2>/dev/null)" ]]; then
+if [[ "$PUSH" == "1" ]] && has_unpushed; then
   log "Unpushed commits from a previous run detected — pushing backlog first"
-  push_branch
+  push_branch || die "push to $GIT_REMOTE/$GIT_BRANCH failed 3 times (logs/push.log) — fix credentials and re-run"
 fi
 
 for phase_file in "${PHASES[@]}"; do
-  slug="$(phase_slug "$phase_file")"
   if phase_done "$phase_file"; then
     log "Phase $phase_file: already completed in a previous run — skipping"
     continue
   fi
-
-  log "Phase $phase_file: launching agent (log: state/logs/phase-$slug.log)"
-  run_agent "$LOGS/phase-$slug.log" "$(phase_prompt "$phase_file")" \
-    || die "agent failed in phase $phase_file (state/logs/phase-$slug.log)"
-
-  if [[ -n "$GATE_CMD" ]]; then
-    log "Running independent gates: $GATE_CMD"
-    if ! bash -c "$GATE_CMD" >>"$LOGS/gates-$slug.log" 2>&1; then
-      log "Gates RED — one remediation attempt"
-      run_agent "$LOGS/phase-$slug-remediation.log" "$(remediation_prompt "$phase_file")" \
-        || die "remediation agent failed in phase $phase_file"
-      bash -c "$GATE_CMD" >>"$LOGS/gates-$slug-after-remediation.log" 2>&1 \
-        || die "phase $phase_file still red after remediation"
-    fi
-  fi
-
-  checkpoint_commit "$phase_file"
-  echo "$phase_file" >> "$DONE_FILE"
-  push_branch
-  log "Phase $phase_file: done, committed, pushed"
+  run_phase "$phase_file"
 done
 
 log "All phases complete"
-{
-  echo "# Phase run — SUCCESS $(date -u +%FT%TZ)"
-  echo
-  echo "Branch: $GIT_BRANCH"
-  git log --oneline -20
-} > "$STATE/SUMMARY.md"
+write_summary "SUCCESS"

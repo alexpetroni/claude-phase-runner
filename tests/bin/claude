@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Fake Claude Code for driver tests. Each invocation pops the first line of
+# $FAKE_PLAN — "<role>:<outcome>" — checks that the driver launched it with
+# that role, behaves accordingly, and emits stream-json on stdout like the
+# real CLI. Arguments, prompt and role are recorded under $FAKE_LOG/<n>.* so
+# tests can assert on what the driver sent.
+set -uo pipefail
+: "${FAKE_PLAN:?}" "${FAKE_LOG:?}"
+
+if [[ "${1:-}" == "--version" ]]; then echo "0.0.0 (fake)"; exit 0; fi
+
+mkdir -p "$FAKE_LOG"
+n=$(( $(find "$FAKE_LOG" -name '*.args' | wc -l) + 1 ))
+printf '%s\n' "$@" > "$FAKE_LOG/$n.args"
+prompt=""; prev=""; sid=""
+for a in "$@"; do
+  [[ "$prev" == "-p" ]] && prompt="$a"
+  case "$prev" in --session-id|--resume) sid="$a" ;; esac
+  prev="$a"
+done
+printf '%s' "$prompt" > "$FAKE_LOG/$n.prompt"
+role="${PHASE_RUNNER_ROLE:-}"
+echo "$role" > "$FAKE_LOG/$n.role"
+
+line="$(head -n1 "$FAKE_PLAN")"
+sed -i '1d' "$FAKE_PLAN"
+if [[ -z "$line" ]]; then
+  echo "fake-claude: plan exhausted at invocation $n (role '$role')" >&2; exit 97
+fi
+want="${line%%:*}"; outcome="${line#*:}"
+if [[ "$want" != "$role" ]]; then
+  echo "fake-claude: invocation $n expected role '$want' but the driver launched '$role'" >&2; exit 98
+fi
+
+emit() { printf '%s\n' "$1"; }
+say()  { emit "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":$(jq -Rn --arg t "$1" '$t')}]}}"; }
+result() { emit "{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":60000,\"total_cost_usd\":0.5,\"num_turns\":3,\"structured_output\":$1}"; }
+emit "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$sid\",\"model\":\"fake\",\"claude_code_version\":\"0.0.0\",\"mcp_servers\":[]}"
+
+# The phase file named in the prompt (first `….md` in backticks) names the work file.
+phase="$(grep -oE '`[^`]+\.md`' <<<"$prompt" | head -1 | tr -d '`')"
+tag="$(basename "${phase:-unknown}" .md)"
+
+commit_work() {
+  echo "invocation $n ($role:$outcome)" >> "built-$tag.txt"
+  git add -A >/dev/null
+  git commit -q -m "$1" >/dev/null
+}
+
+case "$role:$outcome" in
+  build:ok|fix:ok)
+    say "Working on $tag"
+    commit_work "feat($tag): fake work $n"
+    result "{\"status\":\"done\",\"summary\":\"fake $role $n done\",\"commits\":[\"fake work $n\"]}" ;;
+  build:gatefix|fix:gatefix)
+    say "Making the gate green"
+    touch gate-ok
+    commit_work "fix($tag): gate green $n"
+    result "{\"status\":\"done\",\"summary\":\"gate fixed\"}" ;;
+  build:uncommitted)
+    echo "leftover" > "leftover-$tag.txt"
+    result "{\"status\":\"done\",\"summary\":\"forgot to commit\"}" ;;
+  build:noreport)
+    commit_work "feat($tag): work without report $n"
+    emit '{"type":"result","subtype":"success","duration_ms":1000,"total_cost_usd":0.1,"num_turns":1,"result":"plain text, no schema"}' ;;
+  build:blocked|fix:blocked)
+    say "Cannot proceed"
+    result "{\"status\":\"blocked\",\"summary\":\"needs an API key\",\"blockers\":\"MARKER-BLOCKER\"}" ;;
+  build:transient|fix:transient|review:transient)
+    say "starting"
+    echo 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
+    exit 1 ;;
+  build:stall|review:stall)
+    say "thinking"
+    trap 'kill $(jobs -p) 2>/dev/null; exit 143' TERM
+    sleep 300 & wait
+    exit 1 ;;
+  build:nosession|fix:nosession)
+    echo "No conversation found with session ID $sid"
+    exit 1 ;;
+  build:fatal)
+    echo "Error: something non-transient happened"
+    exit 1 ;;
+  review:PASS)
+    say "Reviewing"
+    result '{"verdict":"PASS","summary":"all good","dod":[{"item":"A works","verdict":"PASS","evidence":"ran it"}],"findings":[]}' ;;
+  review:FAIL)
+    say "Reviewing"
+    result "{\"verdict\":\"FAIL\",\"summary\":\"not done\",\"dod\":[{\"item\":\"A works\",\"verdict\":\"FAIL\",\"evidence\":\"no test\"}],\"findings\":[{\"severity\":\"high\",\"file\":\"src/a.ts\",\"line\":3,\"what\":\"MARKER-FINDING-$n\",\"fix\":\"add the test\"}]}" ;;
+  review:dirty)
+    echo "junk" > stray-from-reviewer.txt
+    result '{"verdict":"PASS","summary":"good, but I left a file behind","dod":[],"findings":[]}' ;;
+  preflight:ok|final-review:ok)
+    result "{\"report\":\"# Report from $role $n\\n\\nMARKER-REPORT\"}" ;;
+  *)
+    echo "fake-claude: unknown plan line '$line'" >&2; exit 99 ;;
+esac
+exit 0
