@@ -177,7 +177,7 @@ All paths are relative to the project root. Phases are listed in
 | `PHASE_REVIEW` | `1` | Run the independent reviewer after every phase. `0` = gate only. |
 | `MAX_FIX_ROUNDS` | `2` | Fix rounds per phase before it is recorded as blocked. |
 | `COMMIT_REVIEWS` / `REVIEWS_DIR` | `0` / `docs/verification` | Also commit the latest verdict into the repository. |
-| `CLAUDE_MODEL`, `CLAUDE_EFFORT` | CLI default | Model/effort for every role. |
+| `CLAUDE_MODEL`, `CLAUDE_EFFORT` | `claude-fable-5-1`, `xhigh` | Model/effort for every role. |
 | `BUILD_MODEL`, `BUILD_EFFORT` | ↑ | Override for the builder (and fix rounds). |
 | `REVIEW_MODEL`, `REVIEW_EFFORT` | ↑ | Override for the reviewer, preflight and final review — a stronger judge is cheap. |
 | `BUILD_BUDGET_USD`, `REVIEW_BUDGET_USD` | none | Hard spend cap per agent run. |

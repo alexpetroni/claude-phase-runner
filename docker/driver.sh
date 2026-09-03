@@ -45,6 +45,9 @@ PHASE_REVIEW="${PHASE_REVIEW:-1}"
 MAX_FIX_ROUNDS="${MAX_FIX_ROUNDS:-2}"
 COMMIT_REVIEWS="${COMMIT_REVIEWS:-0}"
 REVIEWS_DIR="${REVIEWS_DIR:-docs/verification}"
+# Model/effort for every role unless runner.env overrides them (BUILD_*/REVIEW_* per role).
+CLAUDE_MODEL="${CLAUDE_MODEL:-claude-fable-5-1}"
+CLAUDE_EFFORT="${CLAUDE_EFFORT:-xhigh}"
 
 [[ -f "$ENTRY_FILE" ]] || die "entry file not found: $ENTRY_FILE (path is relative to the project root)"
 for p in "${PHASES[@]}"; do
@@ -253,7 +256,7 @@ report_pass() {
 # ── Main ──────────────────────────────────────────────────────────────────────
 log "Phase runner ($MODE) in $PROJECT_DIR — branch $GIT_BRANCH, remote $GIT_REMOTE"
 log "Phases: ${PHASES[*]}"
-log "Builder: model ${BUILD_MODEL:-${CLAUDE_MODEL:-default}}${BUILD_EFFORT:+, effort $BUILD_EFFORT}${BUILD_BUDGET_USD:+, budget \$$BUILD_BUDGET_USD} · Reviewer: $(onoff "$PHASE_REVIEW"), model ${REVIEW_MODEL:-${CLAUDE_MODEL:-default}}${REVIEW_EFFORT:+, effort $REVIEW_EFFORT}${REVIEW_BUDGET_USD:+, budget \$$REVIEW_BUDGET_USD} · fix rounds ≤ $MAX_FIX_ROUNDS · gate: ${GATE_CMD:-none}"
+log "Builder: model ${BUILD_MODEL:-$CLAUDE_MODEL}, effort ${BUILD_EFFORT:-$CLAUDE_EFFORT}${BUILD_BUDGET_USD:+, budget \$$BUILD_BUDGET_USD} · Reviewer: $(onoff "$PHASE_REVIEW"), model ${REVIEW_MODEL:-$CLAUDE_MODEL}, effort ${REVIEW_EFFORT:-$CLAUDE_EFFORT}${REVIEW_BUDGET_USD:+, budget \$$REVIEW_BUDGET_USD} · fix rounds ≤ $MAX_FIX_ROUNDS · gate: ${GATE_CMD:-none}"
 log "Retry schedule: ${SCHEDULE[*]}s; stall timeout: ${STALL_TIMEOUT}s; guard hook: $(onoff "$GUARD")"
 
 case "$MODE" in
