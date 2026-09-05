@@ -45,6 +45,15 @@ PHASE_REVIEW="${PHASE_REVIEW:-1}"
 MAX_FIX_ROUNDS="${MAX_FIX_ROUNDS:-2}"
 COMMIT_REVIEWS="${COMMIT_REVIEWS:-0}"
 REVIEWS_DIR="${REVIEWS_DIR:-docs/verification}"
+# fresh = every fix round starts a new context; resume = continue the builder's
+# own session (cheaper while its prompt cache is warm, see README "Cost").
+FIX_CONTEXT="${FIX_CONTEXT:-fresh}"
+# The phases manifest also carries per-phase options (`path model=… effort=…`).
+MANIFEST="${RUNNER_MANIFEST:-$PROJECT_DIR/.phase-runner/phases}"
+# Per-phase progress markers: a run interrupted after the builder finished
+# resumes at the gate instead of paying for the builder again.
+PROGRESS="$STATE/progress"
+mkdir -p "$PROGRESS"
 # Model/effort for every role unless runner.env overrides them (BUILD_*/REVIEW_* per role).
 CLAUDE_MODEL="${CLAUDE_MODEL:-claude-fable-5-1}"
 CLAUDE_EFFORT="${CLAUDE_EFFORT:-xhigh}"
@@ -61,6 +70,40 @@ ensure_exclude
 phase_done() { grep -qxF "$1" "$DONE_FILE"; }
 onoff() { [[ "$1" == "1" ]] && echo on || echo off; }
 
+# Per-phase options from the manifest line `path key=value …`. Sets the PHASE_*
+# globals that lib/claude.sh consults before the per-role and global settings.
+# Keys: model effort fix_model fix_effort review_model review_effort.
+phase_opts() {  # phase_opts PHASE
+  PHASE_MODEL=""; PHASE_EFFORT=""; PHASE_FIX_MODEL=""; PHASE_FIX_EFFORT=""; PHASE_REVIEW_MODEL=""; PHASE_REVIEW_EFFORT=""
+  [[ -f "$MANIFEST" ]] || return 0
+  local opts kv
+  opts="$(sed -e 's/#.*//' "$MANIFEST" | awk -v p="$1" '$1 == p { $1 = ""; print; exit }')"
+  for kv in $opts; do
+    case "${kv%%=*}" in
+      model)         PHASE_MODEL="${kv#*=}" ;;
+      effort)        PHASE_EFFORT="${kv#*=}" ;;
+      fix_model)     PHASE_FIX_MODEL="${kv#*=}" ;;
+      fix_effort)    PHASE_FIX_EFFORT="${kv#*=}" ;;
+      review_model)  PHASE_REVIEW_MODEL="${kv#*=}" ;;
+      review_effort) PHASE_REVIEW_EFFORT="${kv#*=}" ;;
+      *) warn "phases manifest: unknown option '$kv' on $1 — ignored" ;;
+    esac
+  done
+}
+roles_desc() { printf 'builder %s · fix %s · reviewer %s' "$(role_desc build)" "$(role_desc fix)" "$(role_desc review)"; }
+
+# progress/<slug>: written after every successful builder or fix run, removed
+# when the phase is done or blocked. Keys: base (HEAD before the builder),
+# round (last completed fix round), sid (that run's session, for FIX_CONTEXT=resume).
+save_progress()  { printf 'base=%s\nround=%s\nsid=%s\n' "$2" "$3" "$4" > "$PROGRESS/$1"; }
+clear_progress() { rm -f "$PROGRESS/$1"; }
+load_progress()  {  # load_progress SLUG → sets P_BASE P_ROUND P_SID; 1 when absent or unusable
+  local f="$PROGRESS/$1"
+  [[ -f "$f" ]] || return 1
+  P_BASE="$(sed -n 's/^base=//p' "$f")"; P_ROUND="$(sed -n 's/^round=//p' "$f")"; P_SID="$(sed -n 's/^sid=//p' "$f")"
+  [[ "$P_ROUND" =~ ^[0-9]+$ ]] && git cat-file -e "$P_BASE^{commit}" 2>/dev/null
+}
+
 # ── Prompts ───────────────────────────────────────────────────────────────────
 entry_text() { cat "$ENTRY_FILE"; }
 rules_text() { render_prompt rules ENTRY_FILE="$ENTRY_FILE"; }
@@ -74,15 +117,26 @@ fix_prompt() {  # fix_prompt PHASE ROUND DIFF_RANGE REASON
     DIFF_RANGE="$3" REASON="$4" RULES="$(rules_text)"
 }
 
+# The lean variant for FIX_CONTEXT=resume: entry file and rules are already in the session.
+fix_resume_prompt() {  # fix_resume_prompt PHASE ROUND REASON
+  render_prompt fix-resume PHASE_FILE="$1" ROUND="$2" MAX_ROUNDS="$MAX_FIX_ROUNDS" REASON="$3"
+}
+
 review_prompt() {  # review_prompt PHASE BASE GATE_LOG
-  local commits diffstat gate_out
+  local commits diffstat gate
   commits="$(git log --oneline "$2..HEAD" 2>/dev/null)"
   [[ -n "$commits" ]] || commits="(no commits — the builder committed nothing in this phase)"
   diffstat="$(git diff --stat "$2..HEAD" 2>/dev/null | tail -40)"
   [[ -n "$diffstat" ]] || diffstat="(empty diff)"
-  if [[ -n "$3" && -f "$3" ]]; then gate_out="$(tail -40 "$3")"; else gate_out="(no gate command configured — run the project's own checks yourself)"; fi
+  if [[ -n "$3" && -f "$3" ]]; then
+    # The reviewer only runs after a green gate: that run is the runner's own
+    # evidence, so the reviewer should not pay to repeat it.
+    gate="The runner itself ran the gate command \`$GATE_CMD\` on this exact commit and it passed; last lines of its output:"$'\n\n```\n'"$(tail -40 "$3")"$'\n```\n\n'"That gate run is the runner's own execution, not the builder's claim: take it as proof that the suite is green and do not re-run the whole gate or the full build. Your job is what a green suite cannot prove — that the tests actually test the Definition of Done and that the code is correct."
+  else
+    gate="No gate command is configured for this project, so nothing has verified the suite yet: run the project's own checks yourself (tests, type check, lint, build — as the entry prompt describes them), once, and treat their output as your evidence."
+  fi
   render_prompt review ENTRY="$(entry_text)" PHASE_FILE="$1" DIFF_RANGE="${2:0:12}..HEAD" \
-    COMMITS="$commits" DIFFSTAT="$diffstat" GATE_CMD="${GATE_CMD:-<none configured>}" GATE_OUTPUT="$gate_out"
+    COMMITS="$commits" DIFFSTAT="$diffstat" GATE_SECTION="$gate"
 }
 
 preflight_prompt() {
@@ -95,12 +149,14 @@ final_review_prompt() {
 }
 
 # ── Roles ─────────────────────────────────────────────────────────────────────
-# run_builder PHASE ROLE ROUND LOGFILE PROMPT → 0 done, 1 blocked; dies on infra failure
+# run_builder PHASE ROLE ROUND LOGFILE PROMPT [RESUME_SID] → 0 done, 1 blocked,
+# 3 the session to resume is gone (nothing recorded); dies on infra failure
 run_builder() {
-  local phase="$1" role="$2" round="$3" logfile="$4" prompt="$5"
+  local phase="$1" role="$2" round="$3" logfile="$4" prompt="$5" resume="${6:-}"
   local t0 rc status summary
   t0=$(date +%s)
-  run_agent "$logfile" "$role" "$prompt"; rc=$?
+  run_agent "$logfile" "$role" "$prompt" "$resume"; rc=$?
+  (( rc == 3 )) && return 3
   render_log "$logfile"
   BUILDER_JSON="$(structured_output "$logfile")"
   status="$(jq -r '.status // "unknown"' <<<"${BUILDER_JSON:-null}" 2>/dev/null)"
@@ -123,6 +179,21 @@ run_builder() {
   fi
   [[ "$status" == "done" ]] || warn "$role returned no structured report (status=$status) — proceeding to gate and review"
   return 0
+}
+
+# run_fix PHASE SLUG ROUND LOGFILE REASON BASE → run_builder's result for the fix role.
+# FIX_CONTEXT=resume continues the previous builder/fix session (BUILD_SID) and
+# falls back to a fresh context when that session no longer exists.
+run_fix() {
+  local phase="$1" slug="$2" round="$3" logfile="$4" reason="$5" base="$6" rc
+  if [[ "$FIX_CONTEXT" == "resume" && -n "${BUILD_SID:-}" ]]; then
+    log "Phase $phase: FIX round $round/$MAX_FIX_ROUNDS — resuming the builder's session ${BUILD_SID:0:8} (log: $(rel "$logfile"))"
+    run_builder "$phase" fix "$round" "$logfile" "$(fix_resume_prompt "$phase" "$round" "$reason")" "$BUILD_SID"; rc=$?
+    (( rc == 3 )) || return "$rc"
+    warn "session ${BUILD_SID:0:8} cannot be resumed — running the fix round with a fresh context"
+  fi
+  log "Phase $phase: FIX round $round/$MAX_FIX_ROUNDS — builder with a fresh context (log: $(rel "$logfile"))"
+  run_builder "$phase" fix "$round" "$logfile" "$(fix_prompt "$phase" "$round" "${base:0:12}..HEAD" "$reason")"
 }
 
 # run_gate PHASE SLUG ROUND → 0 green / 1 red; sets GATE_LOG
@@ -182,6 +253,7 @@ mark_blocked() {
   { grep -vF "$phase"$'\t' "$BLOCKED_FILE" 2>/dev/null || true; } > "$BLOCKED_FILE.tmp"
   printf '%s\t%s\n' "$phase" "$(printf '%s' "$reason" | tr '\t\n' '  ')" >> "$BLOCKED_FILE.tmp"
   mv "$BLOCKED_FILE.tmp" "$BLOCKED_FILE"
+  clear_progress "$(phase_slug "$phase")"   # a re-run after the human intervenes restarts from the builder prompt
   checkpoint_commit "chore(runner): checkpoint work after blocked $(basename "$phase")"
   push_branch || warn "push failed — the work is committed locally; fix credentials and re-run"
   die "phase $phase BLOCKED — $reason"
@@ -197,13 +269,23 @@ unblock() {
 run_phase() {
   local phase="$1" slug base round=0 reason logfile
   slug="$(phase_slug "$phase")"
-  base="$(git rev-parse HEAD)"
-  VERDICT=""; VERDICT_MD=""
+  phase_opts "$phase"
+  VERDICT=""; VERDICT_MD=""; BUILD_SID=""
+  log "Phase $phase: $(roles_desc)"
 
-  logfile="$LOGS/$slug.build.log"
-  log "Phase $phase: BUILDER starting (log: $(rel "$logfile"))"
-  run_builder "$phase" build 0 "$logfile" "$(build_prompt "$phase")" \
-    || mark_blocked "$phase" "builder reported blocked: $(jq -r '.summary // ""' <<<"$BUILDER_JSON" | head -c 300) — see $(rel "$REVIEWS")/$slug.blocked.md"
+  if load_progress "$slug"; then
+    base="$P_BASE"; round="$P_ROUND"; BUILD_SID="$P_SID"
+    log "Phase $phase: the builder already finished in an earlier run (base ${base:0:12}, round $round) — skipping straight to gate and review"
+    checkpoint_commit "chore(runner): checkpoint work left by an interrupted run of $(basename "$phase")"
+  else
+    base="$(git rev-parse HEAD)"
+    logfile="$LOGS/$slug.build.log"
+    log "Phase $phase: BUILDER starting (log: $(rel "$logfile"))"
+    run_builder "$phase" build 0 "$logfile" "$(build_prompt "$phase")" \
+      || mark_blocked "$phase" "builder reported blocked: $(jq -r '.summary // ""' <<<"$BUILDER_JSON" | head -c 300) — see $(rel "$REVIEWS")/$slug.blocked.md"
+    BUILD_SID="$LAST_SESSION_ID"
+    save_progress "$slug" "$base" 0 "$BUILD_SID"
+  fi
 
   while :; do
     if ! run_gate "$phase" "$slug" "$round"; then
@@ -222,13 +304,15 @@ run_phase() {
       mark_blocked "$phase" "still failing after $MAX_FIX_ROUNDS fix round(s) (last: ${VERDICT:-gate red}) — see $(rel "$REVIEWS")/$slug.md"
     fi
     logfile="$LOGS/$slug.fix.r$round.log"
-    log "Phase $phase: FIX round $round/$MAX_FIX_ROUNDS — builder with a fresh context (log: $(rel "$logfile"))"
-    run_builder "$phase" fix "$round" "$logfile" "$(fix_prompt "$phase" "$round" "${base:0:12}..HEAD" "$reason")" \
+    run_fix "$phase" "$slug" "$round" "$logfile" "$reason" "$base" \
       || mark_blocked "$phase" "builder reported blocked in fix round $round: $(jq -r '.summary // ""' <<<"$BUILDER_JSON" | head -c 300)"
+    BUILD_SID="$LAST_SESSION_ID"
+    save_progress "$slug" "$base" "$round" "$BUILD_SID"
   done
 
   publish_review "$slug"
   unblock "$phase"
+  clear_progress "$slug"
   echo "$phase" >> "$DONE_FILE"
   push_branch || die "push to $GIT_REMOTE/$GIT_BRANCH failed 3 times (logs/push.log) — the phase is recorded as done; fix credentials and re-run to push the backlog"
   log "Phase $phase: DONE — verified${GATE_CMD:+, gate green}, committed, pushed"
@@ -256,13 +340,17 @@ report_pass() {
 # ── Main ──────────────────────────────────────────────────────────────────────
 log "Phase runner ($MODE) in $PROJECT_DIR — branch $GIT_BRANCH, remote $GIT_REMOTE"
 log "Phases: ${PHASES[*]}"
-log "Builder: model ${BUILD_MODEL:-$CLAUDE_MODEL}, effort ${BUILD_EFFORT:-$CLAUDE_EFFORT}${BUILD_BUDGET_USD:+, budget \$$BUILD_BUDGET_USD} · Reviewer: $(onoff "$PHASE_REVIEW"), model ${REVIEW_MODEL:-$CLAUDE_MODEL}, effort ${REVIEW_EFFORT:-$CLAUDE_EFFORT}${REVIEW_BUDGET_USD:+, budget \$$REVIEW_BUDGET_USD} · fix rounds ≤ $MAX_FIX_ROUNDS · gate: ${GATE_CMD:-none}"
+log "Builder: $(role_desc build)${BUILD_BUDGET_USD:+, budget \$$BUILD_BUDGET_USD} · Fix rounds (≤ $MAX_FIX_ROUNDS, $FIX_CONTEXT context): $(role_desc fix) · Reviewer: $(onoff "$PHASE_REVIEW"), $(role_desc review)${REVIEW_BUDGET_USD:+, budget \$$REVIEW_BUDGET_USD} · gate: ${GATE_CMD:-none}"
+log "Subagents: ${SUBAGENT_MODEL:-inherit the parent model} · inline Bash output ≤ ${BASH_OUTPUT_MAX_CHARS:-30000 (Claude Code default)} chars · per-phase overrides: $([[ -f "$MANIFEST" ]] && echo "$(rel "$MANIFEST")" || echo none)"
 log "Retry schedule: ${SCHEDULE[*]}s; stall timeout: ${STALL_TIMEOUT}s; guard hook: $(onoff "$GUARD")"
 
 case "$MODE" in
   dry-run)
     for p in "${PHASES[@]}"; do
       phase_done "$p" && { log "Phase $p: already done — would skip"; continue; }
+      phase_opts "$p"
+      log "Phase $p: $(roles_desc)"
+      load_progress "$(phase_slug "$p")" && log "Phase $p: builder already finished (progress marker) — a real run would skip straight to gate and review"
       log "DRY RUN — the builder prompt for the first pending phase ($p) follows. No agent is launched."
       echo
       build_prompt "$p"

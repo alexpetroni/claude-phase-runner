@@ -41,16 +41,17 @@ docker/bootstrap.sh       root entrypoint: socket group, git identity, trust, dr
 docker/driver.sh          the phase loop: builder → gate → reviewer → fix rounds → push
 docker/lib/               claude.sh (roles, retries, watchdog) · git.sh · common.sh · renderers
 docker/guard.sh           the enforcement hook (per-role rules, tested)
-prompts/*.md              builder, fix, reviewer, preflight, final-review instructions — edit freely
+prompts/*.md              builder, fix (fresh or resumed), reviewer, preflight, final-review instructions — edit freely
 templates/                runner.env, phases, credentials.env starting points
 tests/                    bash tests/run.sh — driver, CLI and guard tests with a fake `claude`
 docker-compose.yml        container definition (same-path repo mount, DooD, agent home)
 
 <project>/.phase-runner/  created by `phase-runner init`, excluded via .git/info/exclude
   runner.env              per-project configuration
-  phases                  phase plan files, one per line, in order
+  phases                  phase plan files, one per line, in order, with optional per-phase model/effort
   home/                   the agent's ~/.claude (skills, agents, plugins, sessions)
   state/phases-done       resume marker, one line per completed phase
+  state/progress/         per-phase "builder finished" markers, so an interrupted run resumes at the gate
   state/blocked           phases the run gave up on, with the reason
   state/runs.tsv          one row per agent run / gate / push: outcome, seconds, cost, turns
   state/reviews/          <phase>.md + .json verdicts (latest), <phase>.r<N>.* per round
@@ -123,8 +124,10 @@ prompt. The gate proves *green*, not *done*; that is the reviewer's job.
 disabled, and the guard hook refusing every git mutation. It gets the entry
 file, the phase file, the commit list and diffstat of the phase, and the gate
 output. Its instructions (`prompts/review.md`): list every Definition of Done
-item verbatim, verify each one *itself* against the repository — run the
-tests, read the files, grep — treating the builder's commit messages, notes
+item verbatim, verify each one *itself* against the repository — read the
+changed files and tests, grep, run the specific tests an item needs (the gate's
+green run is the runner's own evidence, so it does not repeat the whole suite)
+— treating the builder's commit messages, notes
 and any self-written verification files as claims, not proof; hunt for skipped
 or vacuous tests, weakened existing tests, swallowed errors, broken entry-file
 invariants, out-of-scope work; review the diff for correctness with `file:line`
@@ -134,10 +137,15 @@ rendered to `state/reviews/<phase>.md` (DoD table with evidence + findings). If
 the reviewer leaves anything in the working tree it is discarded — everything
 was committed before it ran.
 
-**5. Fix rounds.** On a red gate or a `FAIL`, the builder comes back with a
-fresh context and the exact gate output or verdict (`prompts/fix.md`), fixes
-forward, commits; then gate and reviewer run again. `MAX_FIX_ROUNDS` (default
-2) caps this. When it is exhausted the phase is recorded as blocked, the work
+**5. Fix rounds.** On a red gate or a `FAIL`, the builder comes back with the
+exact gate output or verdict and fixes forward, commits; then gate and reviewer
+run again. `FIX_CONTEXT=fresh` (default) gives it a new context and the full
+prompt (`prompts/fix.md`); `FIX_CONTEXT=resume` continues the builder's own
+session with a short prompt (`prompts/fix-resume.md`) — see [Cost](#cost) for
+when that is cheaper. Fix rounds can run at their own model/effort
+(`FIX_MODEL`, `FIX_EFFORT`): they start from a failure signal, so spending more
+there than on the first attempt is the efficient shape. `MAX_FIX_ROUNDS`
+(default 2) caps this. When it is exhausted the phase is recorded as blocked, the work
 is pushed so nothing is lost, and the run stops for you: read
 `state/reviews/<phase>.md`, decide, re-run (the phase restarts from its prompt
 on top of the committed state).
@@ -156,11 +164,62 @@ something that shares none of its context and cannot edit.
 ### Cost
 
 Roughly one reviewer run per phase on top of the build, and one builder + one
-reviewer run per fix round. From real runs: build phases cost $4–48 and take
-12–56 minutes; a read-only review pass costs a few dollars and a few minutes.
-`phase-runner status` shows the per-phase totals. `BUILD_BUDGET_USD` and
-`REVIEW_BUDGET_USD` cap a single run; hitting a cap is an honest stop, not a
-retry.
+reviewer run per fix round. From real runs on Fable 5.1 at xhigh: build phases
+cost $2–30 and take 8–80 minutes; the reviewer adds 15–30% of the builder's
+cost; a fix round with a fresh context costs 30–55% of the build.
+`phase-runner status` shows the per-phase totals (cost is the CLI's own
+estimate; on a subscription the real constraint is the usage window).
+`BUILD_BUDGET_USD` and `REVIEW_BUDGET_USD` cap a single run; hitting a cap is
+an honest stop, not a retry.
+
+**Where a builder run's money goes** (from the `result` events of real runs,
+Fable 5.1 at xhigh, 1-hour prompt cache):
+
+| Bucket | Share | Driven by |
+|---|---|---|
+| Output tokens (~40% of them thinking) | ~40% | effort level, number of turns |
+| Cache writes: tool output entering the context once | ~40% | test/log dumps, file reads, the agent's own edits |
+| Cache reads: the growing context re-read every turn | ~16% | turns × context size |
+| Fresh input | <2% | the prompt |
+
+**The levers, in order of impact — all configurable, see the table below:**
+
+1. **Effort per role and per phase.** Fable 5.1's own guidance: `high` for most
+   work, `xhigh` for the most capability-sensitive; `high` on Fable 5.1 still
+   exceeds `xhigh` on the previous generation. The template ships
+   `BUILD_EFFORT=high`, `FIX_EFFORT=xhigh` (re-run failures at the higher
+   setting — same pass rate, about half the cost), `REVIEW_EFFORT=high`, and
+   the `phases` manifest takes `effort=xhigh` for the hard phases and
+   `model=claude-sonnet-5 effort=medium` for the trivial ones (a release cut,
+   a config-only phase). With nothing set, every role runs Fable 5.1 at xhigh.
+2. **Cheaper subagents.** `SUBAGENT_MODEL=claude-sonnet-5` routes the
+   subagents the builder and reviewer spawn (Explore, general-purpose, test
+   audits) to a cheaper model; an agent definition that names its own model
+   still wins.
+3. **Less tool output in the context.** `BASH_OUTPUT_MAX_CHARS` caps what a
+   Bash result puts inline (the rest goes to a file the agent can grep), and
+   `prompts/rules.md` tells the builder to iterate on single test files with
+   a quiet reporter and run the full gate once, at the end — in one real run
+   the builder ran the test suite 57 times. The reviewer is told the gate's
+   green output is the runner's own evidence, so it does targeted checks
+   instead of re-running the whole suite and build.
+4. **No paid re-work.** A run interrupted after the builder finished (usage
+   limit, crash, Ctrl-C) resumes at the gate, not the builder — that was a
+   $6–11 re-audit per interruption in the logs. Subscription usage windows are
+   waited out and the same session resumed instead of aborting the run.
+5. **`FIX_CONTEXT=resume`.** The builder's session already holds the whole
+   repository context; a resumed fix round pays cache reads instead of
+   rebuilding that context, but only while the cache is warm (1 hour on a
+   subscription, 5 minutes on an API key unless `CLAUDE_CODE_PROMPT_CACHE_TTL`
+   is set). If gate + review take longer, the resume rewrites the whole
+   context at the cache-write rate and a fresh context is cheaper — hence
+   `fresh` stays the default. Keep `FIX_EFFORT` unset with `resume`: an effort
+   change invalidates the cache too.
+
+Measure before and after with `phase-runner status`; the per-run cost there is
+the last `result` event of each session (a resumed session reports its total
+cumulatively, so summing every event — the previous behaviour — overstated
+resumed runs by up to 2×).
 
 ---
 
@@ -177,11 +236,16 @@ All paths are relative to the project root. Phases are listed in
 | `PHASE_REVIEW` | `1` | Run the independent reviewer after every phase. `0` = gate only. |
 | `MAX_FIX_ROUNDS` | `2` | Fix rounds per phase before it is recorded as blocked. |
 | `COMMIT_REVIEWS` / `REVIEWS_DIR` | `0` / `docs/verification` | Also commit the latest verdict into the repository. |
-| `CLAUDE_MODEL`, `CLAUDE_EFFORT` | `claude-fable-5-1`, `xhigh` | Model/effort for every role. |
-| `BUILD_MODEL`, `BUILD_EFFORT` | ↑ | Override for the builder (and fix rounds). |
-| `REVIEW_MODEL`, `REVIEW_EFFORT` | ↑ | Override for the reviewer, preflight and final review — a stronger judge is cheap. |
+| `CLAUDE_MODEL`, `CLAUDE_EFFORT` | `claude-fable-5-1`, `xhigh` | Model/effort for every role when nothing more specific is set. |
+| `BUILD_MODEL`, `BUILD_EFFORT` | ↑ | The builder's first attempt (template: `high`). |
+| `FIX_MODEL`, `FIX_EFFORT` | builder's | Fix rounds (template: `xhigh` — spend more after a failure signal). |
+| `REVIEW_MODEL`, `REVIEW_EFFORT` | ↑ | The reviewer, preflight and final review (template: `high`). |
+| `SUBAGENT_MODEL` | inherit | Model for subagents the agents spawn when their definition names none (template: `claude-sonnet-5`). |
+| `BASH_OUTPUT_MAX_CHARS` | Claude Code's 30000 | Inline characters of a Bash result; the rest is saved to a file the agent can grep (template: 16000). |
+| `FIX_CONTEXT` | `fresh` | `resume` continues the builder's session for fix rounds instead of a new context. |
 | `BUILD_BUDGET_USD`, `REVIEW_BUDGET_USD` | none | Hard spend cap per agent run. |
 | `RETRY_SCHEDULE` | `30 300 3600 10800` | Seconds before each retry after a transient failure. The list's length is the retry count. |
+| `LIMIT_WAIT_MAX` | `21600` | Longest wait for a subscription usage window to reset before the run gives up. |
 | `STALL_TIMEOUT` | `1800` | Kill + retry an agent that printed nothing for this long. Keep above your slowest silent step. |
 | `PUSH`, `GIT_REMOTE`, `GIT_BRANCH` | `1`, `origin`, current | Push after every verified phase. |
 | `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | `Phase Runner` / `runner@phase.local` | Identity for runner commits. |
@@ -207,6 +271,19 @@ out — the runner appends it. Do **not** ask the builder to spawn a
 verification subagent or write PASS files any more: the runner's reviewer does
 that, with a context the builder cannot influence, and self-issued verdicts
 are ignored.
+
+**The phases manifest** lists the phase files in order; a line may carry
+per-phase overrides after the path — `model=` `effort=` for the builder,
+`fix_model=` `fix_effort=` for its fix rounds, `review_model=` `review_effort=`
+for its reviewer:
+
+```
+docs/phases/PHASE-2-CORE-ENGINE.md   effort=xhigh
+docs/phases/PHASE-7-RELEASE.md       model=claude-sonnet-5 effort=medium review_effort=medium
+```
+
+Put the top effort on the phases that need it rather than on all of them;
+`phase-runner build --dry-run` prints the resolved roles per phase.
 
 **Each phase file** is one self-contained slice: deliverables, steps, and an
 explicit **Definition of Done** the reviewer can check item by item. The
@@ -256,6 +333,10 @@ Two failure shapes are treated as transient and retried on `RETRY_SCHEDULE`:
   refused/reset, timeouts, `fetch failed`, `socket hang up`.
 - **Hung** — no output for `STALL_TIMEOUT` seconds. The watchdog kills the
   process and stamps the log with `RUNNER-STALL`.
+- **Usage window** — a subscription's "You've hit your session limit · resets
+  3:20pm". The driver reads the reset time from the CLI's `rate_limit_event`,
+  waits for it (at most `LIMIT_WAIT_MAX`), and resumes the same session. Being
+  out of usage credits is not transient: the run stops with that hint.
 
 Every run gets its own session id; a retry resumes exactly that session, so
 in-flight context is preserved and a false stall-kill is cheap. If the session
@@ -274,8 +355,12 @@ a blocked phase you have since fixed):
 
 1. pushes any commit backlog a previous run left behind,
 2. skips every phase listed in `state/phases-done`,
-3. restarts the first unfinished phase from its builder prompt on top of the
-   committed repository state.
+3. for the first unfinished phase: if its builder had already finished
+   (`state/progress/<phase>` exists), checkpoint-commits anything left in the
+   tree and goes straight to gate and review — the builder's work is never paid
+   for twice; otherwise it restarts from the builder prompt on top of the
+   committed repository state. A blocked phase clears the marker, so after you
+   intervene the builder does start over.
 
 Phases are keyed by their manifest path — renaming a file makes it look new.
 `phase-runner reset` wipes the state; the repository keeps whatever was
@@ -357,6 +442,8 @@ the auth and re-run — the backlog is pushed first. `PUSH=0` disables pushing.
 | A completed phase runs again | Its manifest path changed, or the state was reset. |
 | Need python/go/rust in the image | `EXTRA_APT_PACKAGES="python3 python3-pip"` in `runner.env`; the image rebuilds on the next run. |
 | Reviewer verdicts feel shallow | Sharpen the phase's Definition of Done and set `REVIEW_MODEL`/`REVIEW_EFFORT` higher than the builder's. |
+| A phase costs far more than its size suggests | Read the transcript for repeated full test runs and big output dumps; lower that phase's `effort=` in `phases`, set `BASH_OUTPUT_MAX_CHARS`, see [Cost](#cost). |
+| Run stopped with `hit your session limit` | Older kits aborted here; now the driver waits for the reset (`LIMIT_WAIT_MAX`) and resumes. `out of usage credits` still stops the run — top up or switch to API billing. |
 
 ## Iterating on the kit
 
@@ -367,8 +454,11 @@ changed).
 
 Tests need no Docker and no token: `bash tests/run.sh` runs a fake `claude`
 (`tests/bin/claude`) through every scenario — happy path, reviewer FAIL → fix
-→ PASS, exhausted rounds, red gate, transient retry with session resume,
-stall, no-session restart, blocked builder, resume, dry run, two phases,
+→ PASS, exhausted rounds, red gate, transient retry with session resume and
+once-counted cumulative cost, stall, no-session restart, usage-limit wait,
+out-of-credits stop, blocked builder, resume after an interruption (builder
+skipped), per-phase manifest options, per-role model/effort, subagent model
+and output cap, `FIX_CONTEXT=resume` with fallback, dry run, two phases,
 committed verdicts, reviewer leaving files, uncommitted leftovers, preflight,
 final review, the host CLI — plus every guard rule. Add a scenario with each
 behaviour change.

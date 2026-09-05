@@ -144,6 +144,7 @@ assert_eq "$(invocations)" 3 "invocations"
 assert_eq "$(arg_after 2 --resume)" "$(arg_after 1 --session-id)" "resume uses the first session id"
 assert_grep 'interrupted' "$FAKE/2.prompt"
 assert_grep 'Transient API failure' "$OUT"
+assert_grep $'\tbuild\t0\tdone\t[0-9]*\t0.8\t5\t' "$STATE/runs.tsv"   # resumed session: last result per session, not a sum (0.3 + 0.8)
 
 scenario "stall → watchdog kill → retry"
 p="$(new_project stall)"
@@ -194,16 +195,126 @@ assert_eq "$(invocations)" 0 "invocations"
 assert_grep 'DRY RUN' "$OUT"
 assert_grep 'BUILDER for exactly one phase: `plan/A.md`' "$OUT"
 assert_grep 'Be good' "$OUT"
+assert_grep 'Phase plan/A.md: builder model claude-fable-5-1, effort xhigh · fix model claude-fable-5-1, effort xhigh · reviewer model claude-fable-5-1, effort xhigh' "$OUT"
 
-scenario "model/effort: CLAUDE_* for every role, BUILD_*/REVIEW_* per role"
+scenario "model/effort: CLAUDE_* for every role, BUILD_*/FIX_*/REVIEW_* per role, subagent model, output cap"
 p="$(new_project models)"
-CLAUDE_MODEL=claude-opus-5 CLAUDE_EFFORT=high BUILD_MODEL=claude-sonnet-5 REVIEW_EFFORT=max \
-  run_driver "$p" build:ok review:PASS
+CLAUDE_MODEL=claude-opus-5 CLAUDE_EFFORT=high BUILD_MODEL=claude-sonnet-5 REVIEW_EFFORT=max FIX_EFFORT=xhigh \
+  SUBAGENT_MODEL=claude-haiku-4-5 BASH_OUTPUT_MAX_CHARS=16000 \
+  run_driver "$p" build:ok review:FAIL fix:ok review:PASS
 assert_eq "$RC" 0 "rc"
 assert_eq "$(arg_after 1 --model)" claude-sonnet-5 "builder model override"
 assert_eq "$(arg_after 1 --effort)" high "builder effort from CLAUDE_EFFORT"
 assert_eq "$(arg_after 2 --model)" claude-opus-5 "reviewer model from CLAUDE_MODEL"
 assert_eq "$(arg_after 2 --effort)" max "reviewer effort override"
+assert_eq "$(arg_after 3 --model)" claude-sonnet-5 "fix inherits the builder's model"
+assert_eq "$(arg_after 3 --effort)" xhigh "fix effort override"
+assert_grep '^CLAUDE_CODE_SUBAGENT_MODEL=claude-haiku-4-5$' "$FAKE/1.env"
+assert_grep '^CLAUDE_CODE_SUBAGENT_MODEL=claude-haiku-4-5$' "$FAKE/2.env"
+assert_eq "$(arg_after 1 --settings | jq -c .)" '{"bashOutputMaxChars":16000}' "settings carry the inline output cap (guard off)"
+assert_grep 'Fix rounds .*model claude-sonnet-5, effort xhigh' "$OUT"
+assert_grep 'Subagents: claude-haiku-4-5' "$OUT"
+
+scenario "no subagent model configured → nothing forced on the agent"
+p="$(new_project nosub)"
+run_driver "$p" build:ok review:PASS
+assert_eq "$RC" 0 "rc"
+assert_not_grep 'CLAUDE_CODE_SUBAGENT_MODEL' "$FAKE/1.env"
+assert_not_grep -- '--settings' "$FAKE/1.args"
+
+scenario "per-phase options in the manifest override runner.env for that phase"
+p="$(new_project phaseopts)"
+mkdir -p "$p/.phase-runner"
+printf '# plan\nplan/A.md  model=claude-sonnet-5 effort=medium review_effort=high fix_effort=xhigh bogus=1  # trailing\nplan/B.md\n' > "$p/.phase-runner/phases"
+PHASE_FILES="plan/A.md plan/B.md" run_driver "$p" build:ok review:FAIL fix:ok review:PASS build:ok review:PASS
+assert_eq "$RC" 0 "rc"
+assert_eq "$(arg_after 1 --model)" claude-sonnet-5 "phase A builder model"
+assert_eq "$(arg_after 1 --effort)" medium "phase A builder effort"
+assert_eq "$(arg_after 2 --model)" claude-fable-5-1 "phase A reviewer keeps the default model"
+assert_eq "$(arg_after 2 --effort)" high "phase A reviewer effort"
+assert_eq "$(arg_after 3 --model)" claude-sonnet-5 "phase A fix inherits the phase model"
+assert_eq "$(arg_after 3 --effort)" xhigh "phase A fix effort"
+assert_eq "$(arg_after 5 --model)" claude-fable-5-1 "phase B builder back to defaults"
+assert_eq "$(arg_after 5 --effort)" xhigh "phase B builder effort back to defaults"
+assert_grep "unknown option 'bogus=1'" "$OUT"
+assert_grep 'Phase plan/A.md: builder model claude-sonnet-5, effort medium' "$OUT"
+# the host CLI hands the driver paths only
+assert_eq "$( (source <(sed -n '/^read_manifest()/,/^}/p' "$KIT/bin/phase-runner"); read_manifest "$p/.phase-runner/phases") )" "plan/A.md plan/B.md" "read_manifest strips options"
+
+scenario "interrupted after the builder finished → re-run skips the builder, goes to gate + review"
+p="$(new_project interrupted)"
+run_driver "$p" build:ok            # the reviewer finds the fake plan exhausted → the driver dies mid-phase
+assert_eq "$RC" 1 "rc of the interrupted run"
+assert_grep '^base=[0-9a-f]{40}$' "$STATE/progress/A.md"
+assert_grep '^round=0$' "$STATE/progress/A.md"
+assert_not_grep 'plan/A.md' "$STATE/phases-done"
+echo "half-done edit" > "$p/inflight.txt"          # work the crash left uncommitted
+run_driver "$p" review:PASS
+assert_eq "$RC" 0 "rc of the resumed run"
+assert_eq "$(invocations)" 1 "only the reviewer runs"
+assert_eq "$(cat "$FAKE/1.role")" review "role"
+assert_grep 'skipping straight to gate and review' "$OUT"
+assert_grep 'fake work 1' "$FAKE/1.prompt"       # the reviewer still sees the original builder commits
+assert_grep 'checkpoint work left by an interrupted run' <(git -C "$p" log --oneline)
+assert_grep '^plan/A.md$' "$STATE/phases-done"
+assert_no_file "$STATE/progress/A.md"
+
+scenario "blocked phase clears the progress marker → re-run restarts from the builder prompt"
+p="$(new_project blockedprogress)"
+MAX_FIX_ROUNDS=0 run_driver "$p" build:ok review:FAIL
+assert_eq "$RC" 1 "rc"
+assert_no_file "$STATE/progress/A.md"
+
+scenario "usage limit → wait for the window to reset, resume the same session"
+p="$(new_project limit)"
+LIMIT_WAIT_GRACE=0 run_driver "$p" build:limit build:ok review:PASS
+assert_eq "$RC" 0 "rc"
+assert_eq "$(invocations)" 3 "invocations"
+assert_grep 'Usage limit reached' "$OUT"
+assert_eq "$(arg_after 2 --resume)" "$(arg_after 1 --session-id)" "resume uses the first session id"
+assert_grep '^plan/A.md$' "$STATE/phases-done"
+
+scenario "out of usage credits is an honest stop, not a retry"
+p="$(new_project nocredits)"
+run_driver "$p" build:nocredits
+assert_eq "$RC" 1 "rc"
+assert_eq "$(invocations)" 1 "invocations"
+assert_grep 'out of usage credits' "$OUT"
+assert_not_grep 'Usage limit reached' "$OUT"
+
+scenario "FIX_CONTEXT=resume continues the builder's own session with the lean prompt"
+p="$(new_project fixresume)"
+FIX_CONTEXT=resume run_driver "$p" build:ok review:FAIL fix:ok review:PASS
+assert_eq "$RC" 0 "rc"
+assert_eq "$(invocations)" 4 "invocations"
+assert_eq "$(arg_after 3 --resume)" "$(arg_after 1 --session-id)" "fix resumes the builder session"
+assert_grep 'continuing in your own session' "$FAKE/3.prompt"
+assert_grep 'MARKER-FINDING-2' "$FAKE/3.prompt"
+assert_not_grep 'Be good' "$FAKE/3.prompt"        # entry file is already in the session
+assert_grep "resuming the builder's session" "$OUT"
+assert_grep $'\tfix\t1\tdone\t' "$STATE/runs.tsv"
+
+scenario "FIX_CONTEXT=resume falls back to a fresh context when the session is gone"
+p="$(new_project fixresumegone)"
+FIX_CONTEXT=resume run_driver "$p" build:ok review:FAIL fix:nosession fix:ok review:PASS
+assert_eq "$RC" 0 "rc"
+assert_eq "$(invocations)" 5 "invocations"
+assert_grep 'cannot be resumed' "$OUT"
+assert_grep '--session-id' "$FAKE/4.args"
+assert_grep 'fix round 1 of 2' "$FAKE/4.prompt"
+assert_grep 'Be good' "$FAKE/4.prompt"
+assert_eq "$(grep -c $'\tfix\t' "$STATE/runs.tsv")" 1 "the failed resume attempt is not recorded as a run"
+
+scenario "reviewer prompt: gate evidence when a gate ran, own checks when none is configured"
+p="$(new_project gateprompt)"
+run_driver "$p" build:ok review:PASS
+assert_grep 'ran the gate command `true` on this exact commit and it passed' "$FAKE/2.prompt"
+assert_grep 'do not re-run the whole gate' "$FAKE/2.prompt"
+p="$(new_project nogateprompt)"
+GATE_CMD= run_driver "$p" build:ok review:PASS
+assert_eq "$RC" 0 "rc"
+assert_grep 'No gate command is configured' "$FAKE/2.prompt"
+assert_not_grep 'and it passed' "$FAKE/2.prompt"
 
 scenario "reviewer disabled → gate only"
 p="$(new_project noreview)"

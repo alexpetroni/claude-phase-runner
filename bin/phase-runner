@@ -73,10 +73,12 @@ ensure_exclude() {
   grep -qxF '.phase-runner/' "$f" 2>/dev/null || echo '.phase-runner/' >> "$f"
 }
 
-# phases manifest: one project-relative path per line, '#' comments, blank lines ignored
+# phases manifest: one project-relative path per line, optionally followed by
+# per-phase options (`docs/phases/X.md effort=medium`) that the driver reads
+# itself; '#' comments and blank lines are ignored. Returns the paths only.
 read_manifest() {
   [[ -f "$1" ]] || return 0
-  sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$1" | grep -v '^$' | tr '\n' ' ' | sed 's/ $//'
+  sed -e 's/#.*//' "$1" | awk 'NF { printf "%s%s", (n++ ? " " : ""), $1 }'
 }
 
 load_config() {

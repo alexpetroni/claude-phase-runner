@@ -60,14 +60,16 @@ render_log() {
 
 # ── runs.tsv — one row per agent run / gate / push, read by `status` ────────
 # record_run PHASE ROLE ROUND OUTCOME LOGFILE [NOTE] [SECONDS]
-# Cost and turns are summed over every result event in LOGFILE (retries append
-# to the same file). SECONDS is wall time measured by the caller.
+# Retries append to the same LOGFILE, so it can hold several result events. A
+# resumed session reports its total_cost_usd cumulatively, so cost is the LAST
+# result per session id, summed across sessions; num_turns is per call and is
+# summed over every result. SECONDS is wall time measured by the caller.
 record_run() {
   local phase="$1" role="$2" round="$3" outcome="$4" logfile="$5" note="${6:-}" secs="${7:-}"
   local cost="" turns=""
   if [[ -n "$logfile" && -f "$logfile" ]]; then
     read -r cost turns < <(jq -R -c 'fromjson? | select(.type=="result")' "$logfile" 2>/dev/null \
-      | jq -s -r '[(map(.total_cost_usd // 0) | add // 0 | . * 100 | round / 100), (map(.num_turns // 0) | add // 0)] | @tsv' 2>/dev/null)
+      | jq -s -r '[(group_by(.session_id // "?") | map(last.total_cost_usd // 0) | add // 0 | . * 100 | round / 100), (map(.num_turns // 0) | add // 0)] | @tsv' 2>/dev/null)
   fi
   [[ -f "$RUNS_FILE" ]] || printf 'ts\tphase\trole\tround\toutcome\tseconds\tcost_usd\tturns\tnote\n' > "$RUNS_FILE"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \

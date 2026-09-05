@@ -31,15 +31,22 @@ services:
       # models, effort, spend caps
       CLAUDE_MODEL: ${CLAUDE_MODEL:-}
       BUILD_MODEL: ${BUILD_MODEL:-}
+      FIX_MODEL: ${FIX_MODEL:-}
       REVIEW_MODEL: ${REVIEW_MODEL:-}
+      SUBAGENT_MODEL: ${SUBAGENT_MODEL:-}
       CLAUDE_EFFORT: ${CLAUDE_EFFORT:-}
       BUILD_EFFORT: ${BUILD_EFFORT:-}
+      FIX_EFFORT: ${FIX_EFFORT:-}
       REVIEW_EFFORT: ${REVIEW_EFFORT:-}
       BUILD_BUDGET_USD: ${BUILD_BUDGET_USD:-}
       REVIEW_BUDGET_USD: ${REVIEW_BUDGET_USD:-}
+      # context hygiene, fix-round context
+      BASH_OUTPUT_MAX_CHARS: ${BASH_OUTPUT_MAX_CHARS:-}
+      FIX_CONTEXT: ${FIX_CONTEXT:-fresh}
       # resilience
       RETRY_SCHEDULE: ${RETRY_SCHEDULE:-30 300 3600 10800}
       STALL_TIMEOUT: ${STALL_TIMEOUT:-1800}
+      LIMIT_WAIT_MAX: ${LIMIT_WAIT_MAX:-21600}
       GUARD: ${GUARD:-1}
       # git
       GIT_REMOTE: ${GIT_REMOTE:-origin}

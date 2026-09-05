@@ -12,15 +12,16 @@ if [[ "${1:-}" == "--version" ]]; then echo "0.0.0 (fake)"; exit 0; fi
 mkdir -p "$FAKE_LOG"
 n=$(( $(find "$FAKE_LOG" -name '*.args' | wc -l) + 1 ))
 printf '%s\n' "$@" > "$FAKE_LOG/$n.args"
-prompt=""; prev=""; sid=""
+prompt=""; prev=""; sid=""; resumed=0
 for a in "$@"; do
   [[ "$prev" == "-p" ]] && prompt="$a"
-  case "$prev" in --session-id|--resume) sid="$a" ;; esac
+  case "$prev" in --session-id) sid="$a" ;; --resume) sid="$a"; resumed=1 ;; esac
   prev="$a"
 done
 printf '%s' "$prompt" > "$FAKE_LOG/$n.prompt"
 role="${PHASE_RUNNER_ROLE:-}"
 echo "$role" > "$FAKE_LOG/$n.role"
+env | grep -E '^CLAUDE_CODE_' > "$FAKE_LOG/$n.env" || true
 
 line="$(head -n1 "$FAKE_PLAN")"
 sed -i '1d' "$FAKE_PLAN"
@@ -34,7 +35,11 @@ fi
 
 emit() { printf '%s\n' "$1"; }
 say()  { emit "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":$(jq -Rn --arg t "$1" '$t')}]}}"; }
-result() { emit "{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":60000,\"total_cost_usd\":0.5,\"num_turns\":3,\"structured_output\":$1}"; }
+# Like the real CLI, a resumed session reports total_cost_usd cumulatively
+# (0.3 from the interrupted attempt + 0.5 from this one); num_turns is per call.
+result() { emit "{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":60000,\"total_cost_usd\":$([[ $resumed == 1 ]] && echo 0.8 || echo 0.5),\"num_turns\":3,\"session_id\":\"$sid\",\"structured_output\":$1}"; }
+# A failed call: the CLI's error text lands in the result event, cost so far attached.
+fail_result() { emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"duration_ms\":1000,\"total_cost_usd\":0.3,\"num_turns\":2,\"session_id\":\"$sid\",\"result\":$(jq -Rn --arg t "$1" '$t')}"; }
 emit "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$sid\",\"model\":\"fake\",\"claude_code_version\":\"0.0.0\",\"mcp_servers\":[]}"
 
 # The phase file named in the prompt (first `….md` in backticks) names the work file.
@@ -69,6 +74,17 @@ case "$role:$outcome" in
   build:transient|fix:transient|review:transient)
     say "starting"
     echo 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
+    fail_result 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
+    exit 1 ;;
+  build:limit|review:limit)
+    say "starting"
+    emit "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"resetsAt\":$(( $(date +%s) + 1 )),\"rateLimitType\":\"five_hour\"}}"
+    fail_result "You've hit your session limit · resets 3:20pm (UTC)"
+    exit 1 ;;
+  build:nocredits)
+    say "starting"
+    emit "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"resetsAt\":$(( $(date +%s) + 1 )),\"rateLimitType\":\"five_hour\",\"overageDisabledReason\":\"out_of_credits\"}}"
+    fail_result "You're out of usage credits. Switch to another model to continue."
     exit 1 ;;
   build:stall|review:stall)
     say "thinking"

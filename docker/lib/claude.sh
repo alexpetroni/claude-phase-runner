@@ -22,6 +22,15 @@ read -r -a SCHEDULE <<< "${RETRY_SCHEDULE:-30 300 3600 10800}"
 STALL_TIMEOUT="${STALL_TIMEOUT:-1800}"
 STALL_POLL="${STALL_POLL:-30}"
 GUARD="${GUARD:-1}"
+# Model for the subagents an agent spawns (Explore, general-purpose, …) when the
+# agent definition names none. Cheap exploration should not run on the flagship.
+SUBAGENT_MODEL="${SUBAGENT_MODEL:-}"
+# Characters of a Bash tool result that enter the context inline; the rest goes
+# to a file the agent can grep. Tool output is the single largest cache-write
+# cost, so keep this modest (Claude Code's default is 30000).
+BASH_OUTPUT_MAX_CHARS="${BASH_OUTPUT_MAX_CHARS:-}"
+# Longest wait for a subscription usage window to reset before giving up.
+LIMIT_WAIT_MAX="${LIMIT_WAIT_MAX:-21600}"
 
 EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
 
@@ -31,26 +40,45 @@ VERDICT_SCHEMA='{"type":"object","properties":{"verdict":{"type":"string","enum"
 
 REPORT_ONLY_SCHEMA='{"type":"object","properties":{"report":{"type":"string"}},"required":["report"]}'
 
-guard_settings() {
-  [[ "$GUARD" == "1" ]] || return 0
-  printf '{"hooks":{"PreToolUse":[{"matcher":"Bash|Edit|Write|MultiEdit|NotebookEdit","hooks":[{"type":"command","command":"bash %s/docker/guard.sh"}]}]}}' "$RUNNER_HOME"
+# The --settings JSON every role gets: the guard hook and the inline tool-output cap.
+role_settings() {
+  local parts=()
+  [[ "$GUARD" == "1" ]] && parts+=("$(printf '"hooks":{"PreToolUse":[{"matcher":"Bash|Edit|Write|MultiEdit|NotebookEdit","hooks":[{"type":"command","command":"bash %s/docker/guard.sh"}]}]}' "$RUNNER_HOME")")
+  [[ "$BASH_OUTPUT_MAX_CHARS" =~ ^[0-9]+$ ]] && parts+=("\"bashOutputMaxChars\":$BASH_OUTPUT_MAX_CHARS")
+  (( ${#parts[@]} )) || return 0
+  local IFS=,
+  printf '{%s}' "${parts[*]}"
 }
+
+# Model/effort resolution, most specific first:
+#   review roles   PHASE_REVIEW_MODEL → REVIEW_MODEL → CLAUDE_MODEL   (effort alike)
+#   fix            PHASE_FIX_MODEL → FIX_MODEL → build's resolution
+#   build          PHASE_MODEL → BUILD_MODEL → CLAUDE_MODEL
+# PHASE_* come from the phase's manifest line (see driver.sh phase_opts).
+role_model()  {  # role_model ROLE → model id or empty
+  case "$1" in
+    review|final-review|preflight) printf '%s' "${PHASE_REVIEW_MODEL:-${REVIEW_MODEL:-${CLAUDE_MODEL:-}}}" ;;
+    fix) printf '%s' "${PHASE_FIX_MODEL:-${FIX_MODEL:-$(role_model build)}}" ;;
+    *)   printf '%s' "${PHASE_MODEL:-${BUILD_MODEL:-${CLAUDE_MODEL:-}}}" ;;
+  esac
+}
+role_effort() {  # role_effort ROLE → effort level or empty
+  case "$1" in
+    review|final-review|preflight) printf '%s' "${PHASE_REVIEW_EFFORT:-${REVIEW_EFFORT:-${CLAUDE_EFFORT:-}}}" ;;
+    fix) printf '%s' "${PHASE_FIX_EFFORT:-${FIX_EFFORT:-$(role_effort build)}}" ;;
+    *)   printf '%s' "${PHASE_EFFORT:-${BUILD_EFFORT:-${CLAUDE_EFFORT:-}}}" ;;
+  esac
+}
+role_desc() { printf 'model %s, effort %s' "$(role_model "$1")" "$(role_effort "$1")"; }  # for log lines
 
 # Fills ROLE_ARGS (a global; bash functions cannot return arrays).
 role_args() {
   ROLE_ARGS=()
   local model effort budget settings
+  model="$(role_model "$1")"; effort="$(role_effort "$1")"
   case "$1" in
-    review|final-review|preflight)
-      model="${REVIEW_MODEL:-${CLAUDE_MODEL:-}}"
-      effort="${REVIEW_EFFORT:-${CLAUDE_EFFORT:-}}"
-      budget="${REVIEW_BUDGET_USD:-}"
-      ;;
-    *)
-      model="${BUILD_MODEL:-${CLAUDE_MODEL:-}}"
-      effort="${BUILD_EFFORT:-${CLAUDE_EFFORT:-}}"
-      budget="${BUILD_BUDGET_USD:-}"
-      ;;
+    review|final-review|preflight) budget="${REVIEW_BUDGET_USD:-}" ;;
+    *)                             budget="${BUILD_BUDGET_USD:-}" ;;
   esac
   [[ -n "$model" ]]  && ROLE_ARGS+=(--model "$model")
   [[ -n "$effort" ]] && ROLE_ARGS+=(--effort "$effort")
@@ -60,7 +88,7 @@ role_args() {
     review)                ROLE_ARGS+=(--disallowedTools "$EDIT_TOOLS" --json-schema "$VERDICT_SCHEMA") ;;
     preflight|final-review) ROLE_ARGS+=(--disallowedTools "$EDIT_TOOLS" --json-schema "$REPORT_ONLY_SCHEMA") ;;
   esac
-  settings="$(guard_settings)"
+  settings="$(role_settings)"
   [[ -n "$settings" ]] && ROLE_ARGS+=(--settings "$settings")
   return 0
 }
@@ -77,8 +105,9 @@ run_claude() {
     resume:*) args+=(--resume "${session#resume:}") ;;
   esac
 
-  PHASE_RUNNER_ROLE="$role" PHASE_RUNNER_PROTECTED="${PROTECTED_PATHS:-}" PROJECT_DIR="$PROJECT_DIR" \
-    claude "${args[@]}" -p "$prompt" >>"$logfile" 2>&1 &
+  local env=(PHASE_RUNNER_ROLE="$role" PHASE_RUNNER_PROTECTED="${PROTECTED_PATHS:-}" PROJECT_DIR="$PROJECT_DIR")
+  [[ -n "$SUBAGENT_MODEL" ]] && env+=(CLAUDE_CODE_SUBAGENT_MODEL="$SUBAGENT_MODEL")
+  env "${env[@]}" claude "${args[@]}" -p "$prompt" >>"$logfile" 2>&1 &
   pid=$!
 
   (
@@ -102,9 +131,32 @@ run_claude() {
   return "$rc"
 }
 
+# The last lines of the log plus the text of the last result event — the CLI's
+# final error message may sit in either place. Buffered into a variable: with
+# pipefail, `producer | grep -q` fails on SIGPIPE when grep matches early.
+log_tail() { { tail -12 "$1"; last_result "$1" | jq -r '.result // empty' 2>/dev/null; } 2>/dev/null; }
+
 is_transient() {
-  tail -8 "$1" | grep -qiE \
-    'RUNNER-STALL|unable to connect|connection ?refused|connection ?reset|econnreset|econnrefused|etimedout|fetch failed|socket hang up|network error|overloaded|rate.?limit|api error.*(5[0-9][0-9]|429)|(5[0-9][0-9]|429).*api error'
+  local t; t="$(log_tail "$1")"
+  out_of_credits_text "$t" && return 1
+  grep -qiE 'RUNNER-STALL|unable to connect|connection ?refused|connection ?reset|econnreset|econnrefused|etimedout|fetch failed|socket hang up|network error|overloaded|rate.?limit|api error.*(5[0-9][0-9]|429)|(5[0-9][0-9]|429).*api error|request timed out' <<<"$t" \
+    || usage_limited_text "$t"
+}
+
+# A subscription usage window ("You've hit your session limit · resets 3:20pm")
+# is transient: it resets on its own. Being out of usage credits is not.
+usage_limited_text() { grep -qiE "hit your (session|weekly|[a-z]+) limit|usage limit" <<<"$1"; }
+out_of_credits_text() { grep -qiE 'out of usage credits|insufficient credits|credit balance' <<<"$1"; }
+out_of_credits() { out_of_credits_text "$(log_tail "$1")"; }
+
+# Seconds until the usage window resets, from the CLI's last rate_limit_event
+# (0 when unknown). Retries wait for this instead of the fixed schedule slot.
+limit_reset_wait() {
+  local at now
+  at="$(jq -R -r 'fromjson? | select(.type=="rate_limit_event" and .rate_limit_info.status=="rejected") | .rate_limit_info.resetsAt // empty' "$1" 2>/dev/null | tail -1)"
+  [[ "$at" =~ ^[0-9]+$ ]] || { echo 0; return; }
+  now=$(date +%s)
+  (( at > now )) && echo $(( at - now + ${LIMIT_WAIT_GRACE:-60} )) || echo 0
 }
 
 no_session() {
@@ -114,29 +166,39 @@ no_session() {
 # What a non-zero, non-transient exit most likely was — for the abort message.
 failure_hint() {
   local tail8; tail8="$(tail -8 "$1")"
-  if grep -qiE 'budget' <<<"$tail8"; then echo "the run hit its --max-budget-usd cap"
+  if out_of_credits "$1"; then echo "the subscription is out of usage credits — top up, wait for the window, or switch to API billing"
+  elif grep -qiE 'max.?budget|budget cap|exceeded.*budget' <<<"$tail8"; then echo "the run hit its --max-budget-usd cap"
   elif grep -qiE 'max.?turns' <<<"$tail8"; then echo "the run hit its max-turns cap"
   elif grep -qiE 'authentication|unauthorized|invalid.*token|401' <<<"$tail8"; then echo "authentication failed — check credentials.env"
   else echo "not a transient API error, so it is not retried"
   fi
 }
 
-# run_agent LOGFILE ROLE PROMPT → exit status of the last attempt.
+# run_agent LOGFILE ROLE PROMPT [RESUME_SID] → exit status of the last attempt.
+# With RESUME_SID the first attempt continues that session (FIX_CONTEXT=resume);
+# returns 3 without retrying when the session no longer exists so the caller can
+# fall back to a fresh context. Sets LAST_SESSION_ID to the session used.
 run_agent() {
-  local logfile="$1" role="$2" prompt="$3"
+  local logfile="$1" role="$2" prompt="$3" resume="${4:-}"
   local max_attempts=$(( ${#SCHEDULE[@]} + 1 ))
-  local attempt rc sid delay
-  sid="$(new_uuid)"
+  local attempt rc sid delay wait
+  if [[ -n "$resume" ]]; then sid="$resume"; else sid="$(new_uuid)"; fi
+  LAST_SESSION_ID="$sid"
 
   for (( attempt=1; attempt<=max_attempts; attempt++ )); do
     if (( attempt == 1 )); then
-      run_claude "$logfile" "$role" "new:$sid" "$prompt"; rc=$?
+      if [[ -n "$resume" ]]; then
+        run_claude "$logfile" "$role" "resume:$sid" "$prompt"; rc=$?
+        if (( rc != 0 )) && no_session "$logfile"; then return 3; fi
+      else
+        run_claude "$logfile" "$role" "new:$sid" "$prompt"; rc=$?
+      fi
     else
       log "Retry $((attempt-1))/${#SCHEDULE[@]} ($role): resuming session ${sid:0:8}"
       run_claude "$logfile" "$role" "resume:$sid" "$(render_prompt continue)"; rc=$?
       if (( rc != 0 )) && no_session "$logfile"; then
         log "No session to resume — restarting the $role prompt from scratch"
-        sid="$(new_uuid)"
+        sid="$(new_uuid)"; LAST_SESSION_ID="$sid"
         run_claude "$logfile" "$role" "new:$sid" "$prompt"; rc=$?
       fi
     fi
@@ -144,7 +206,14 @@ run_agent() {
 
     if (( attempt < max_attempts )) && is_transient "$logfile"; then
       delay="${SCHEDULE[$((attempt-1))]}"
-      log "Transient API failure ($role, attempt $attempt/$max_attempts, rc=$rc) — retrying in ${delay}s"
+      wait="$(limit_reset_wait "$logfile")"
+      if (( wait > 0 )); then
+        (( wait > LIMIT_WAIT_MAX )) && wait="$LIMIT_WAIT_MAX"
+        (( wait > delay )) && delay="$wait"
+        log "Usage limit reached ($role, attempt $attempt/$max_attempts) — waiting ${delay}s for the window to reset, then resuming"
+      else
+        log "Transient API failure ($role, attempt $attempt/$max_attempts, rc=$rc) — retrying in ${delay}s"
+      fi
       sleep "$delay"
       continue
     fi

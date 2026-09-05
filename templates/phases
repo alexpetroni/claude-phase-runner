@@ -2,5 +2,13 @@
 # root. Lines starting with # are comments. Append new phases at the end: a
 # re-run skips every phase already recorded in .phase-runner/state/phases-done
 # (keyed by this path — renaming a file makes it look new).
+#
+# Options after the path override runner.env for that phase only:
+#   model= effort=              the builder          (e.g. a config-only phase on claude-sonnet-5)
+#   fix_model= fix_effort=      its fix rounds
+#   review_model= review_effort= its reviewer
+# Spend the top effort on the hard phases, not on every phase:
+#   docs/phases/PHASE-2-CORE-ENGINE.md   effort=xhigh
+#   docs/phases/PHASE-7-RELEASE.md       model=claude-sonnet-5 effort=medium review_effort=medium
 docs/phases/PHASE-0.md
 docs/phases/PHASE-1.md
