@@ -25,7 +25,10 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
  && rm -rf /var/lib/apt/lists/*
 
-# pnpm (via corepack) + Claude Code
+# pnpm (via corepack) + Claude Code. A project that pins a different pnpm in
+# `packageManager` makes corepack download it on first use; on a TTY (the gate
+# inherits the driver's terminal) that download asks "[Y/n]" and hangs forever.
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable \
  && corepack prepare pnpm@latest --activate \
  && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"

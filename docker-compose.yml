@@ -46,6 +46,7 @@ services:
       # resilience
       RETRY_SCHEDULE: ${RETRY_SCHEDULE:-30 300 3600 10800}
       STALL_TIMEOUT: ${STALL_TIMEOUT:-1800}
+      GATE_TIMEOUT: ${GATE_TIMEOUT:-3600}
       LIMIT_WAIT_MAX: ${LIMIT_WAIT_MAX:-21600}
       GUARD: ${GUARD:-1}
       # git

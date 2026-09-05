@@ -117,8 +117,10 @@ and pushed, the phase is recorded in `state/blocked`, and
 `chore(runner): checkpoint uncommitted work after <phase>`.
 
 **3. Gate.** `GATE_CMD` from the project root, logged to
-`state/logs/<phase>.gate.r<N>.log`. Red → a fix round with the output in the
-prompt. The gate proves *green*, not *done*; that is the reviewer's job.
+`state/logs/<phase>.gate.r<N>.log`, with stdin closed and a `GATE_TIMEOUT`
+cap, so a tool that asks a question (corepack's download prompt) fails
+instead of hanging on the driver's terminal. Red → a fix round with the output
+in the prompt. The gate proves *green*, not *done*; that is the reviewer's job.
 
 **4. Reviewer.** A second `claude -p` run with a fresh context, `Edit`/`Write`
 disabled, and the guard hook refusing every git mutation. It gets the entry
@@ -247,6 +249,7 @@ All paths are relative to the project root. Phases are listed in
 | `RETRY_SCHEDULE` | `30 300 3600 10800` | Seconds before each retry after a transient failure. The list's length is the retry count. |
 | `LIMIT_WAIT_MAX` | `21600` | Longest wait for a subscription usage window to reset before the run gives up. |
 | `STALL_TIMEOUT` | `1800` | Kill + retry an agent that printed nothing for this long. Keep above your slowest silent step. |
+| `GATE_TIMEOUT` | `3600` | Kill the gate command after this long (it is not an agent, the stall watchdog does not cover it). The gate runs with stdin closed, so anything that prompts fails fast. |
 | `PUSH`, `GIT_REMOTE`, `GIT_BRANCH` | `1`, `origin`, current | Push after every verified phase. |
 | `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | `Phase Runner` / `runner@phase.local` | Identity for runner commits. |
 | `EXTRA_APT_PACKAGES` | empty | Extra apt packages baked into the image. |

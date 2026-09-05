@@ -41,6 +41,7 @@ GIT_REMOTE="${GIT_REMOTE:-origin}"
 GIT_BRANCH="${GIT_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
 PUSH="${PUSH:-1}"
 GATE_CMD="${GATE_CMD:-}"
+GATE_TIMEOUT="${GATE_TIMEOUT:-3600}"   # seconds; the gate is not an agent, so the stall watchdog does not cover it
 PHASE_REVIEW="${PHASE_REVIEW:-1}"
 MAX_FIX_ROUNDS="${MAX_FIX_ROUNDS:-2}"
 COMMIT_REVIEWS="${COMMIT_REVIEWS:-0}"
@@ -197,19 +198,26 @@ run_fix() {
 }
 
 # run_gate PHASE SLUG ROUND → 0 green / 1 red; sets GATE_LOG
+# stdin is /dev/null: the gate is unattended, and a tool that asks a question
+# (corepack's download prompt, a "continue? [Y/n]") must fail, not wait forever
+# on the driver's terminal. GATE_TIMEOUT caps the whole command.
 run_gate() {
   GATE_LOG=""
   [[ -n "$GATE_CMD" ]] || return 0
   GATE_LOG="$LOGS/$2.gate.r$3.log"
-  local t0; t0=$(date +%s)
+  local t0 rc; t0=$(date +%s)
   log "Gate (round $3): $GATE_CMD"
-  if bash -c "$GATE_CMD" >"$GATE_LOG" 2>&1; then
+  timeout --kill-after=30 "$GATE_TIMEOUT" bash -c "$GATE_CMD" >"$GATE_LOG" 2>&1 </dev/null; rc=$?
+  if (( rc == 0 )); then
     record_run "$1" gate "$3" green "" "" $(( $(date +%s) - t0 ))
     log "Gate GREEN"
     return 0
   fi
+  if (( rc == 124 || rc == 137 )); then
+    echo "RUNNER-GATE-TIMEOUT: gate command exceeded GATE_TIMEOUT=${GATE_TIMEOUT}s and was killed (rc=$rc)" >>"$GATE_LOG"
+  fi
   record_run "$1" gate "$3" red "" "see $(rel "$GATE_LOG")" $(( $(date +%s) - t0 ))
-  warn "Gate RED (log: $(rel "$GATE_LOG"))"
+  warn "Gate RED (rc=$rc, log: $(rel "$GATE_LOG"))"
   return 1
 }
 

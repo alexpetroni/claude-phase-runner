@@ -128,7 +128,17 @@ assert_file "$STATE/logs/A.md.gate.r1.log"
 assert_grep $'\tgate\t0\tred\t' "$STATE/runs.tsv"
 assert_grep $'\tgate\t1\tgreen\t' "$STATE/runs.tsv"
 
-scenario "gate red, no reviewer, fix rounds exhausted → blocked"
+scenario "gate never waits on stdin and is killed by GATE_TIMEOUT"
+p="$(new_project gatestdin)"
+GATE_CMD='read -r x && echo "got: $x"' PHASE_REVIEW=0 MAX_FIX_ROUNDS=0 run_driver "$p" build:ok
+assert_eq "$RC" 1 "rc"
+assert_grep $'\tgate\t0\tred\t' "$STATE/runs.tsv"
+p="$(new_project gatetimeout)"
+GATE_CMD='sleep 30' GATE_TIMEOUT=1 PHASE_REVIEW=0 MAX_FIX_ROUNDS=0 run_driver "$p" build:ok
+assert_eq "$RC" 1 "rc"
+assert_grep 'RUNNER-GATE-TIMEOUT' "$STATE/logs/A.md.gate.r0.log"
+assert_grep $'\tgate\t0\tred\t' "$STATE/runs.tsv"
+
 p="$(new_project gateblocked)"
 GATE_CMD="false" PHASE_REVIEW=0 MAX_FIX_ROUNDS=1 run_driver "$p" build:ok fix:ok
 assert_eq "$RC" 1 "rc"
