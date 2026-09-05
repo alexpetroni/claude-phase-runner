@@ -71,6 +71,10 @@ case "$role:$outcome" in
   build:blocked|fix:blocked)
     say "Cannot proceed"
     result "{\"status\":\"blocked\",\"summary\":\"needs an API key\",\"blockers\":\"MARKER-BLOCKER\"}" ;;
+  build:blockedwork|fix:blockedwork)
+    say "Did the work, tests still running in the background"
+    commit_work "feat($tag): fake work $n"
+    result "{\"status\":\"blocked\",\"summary\":\"work committed, verification not observed\",\"blockers\":\"MARKER-BLOCKER\"}" ;;
   build:transient|fix:transient|review:transient)
     say "starting"
     echo 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
@@ -106,6 +110,10 @@ case "$role:$outcome" in
   review:dirty)
     echo "junk" > stray-from-reviewer.txt
     result '{"verdict":"PASS","summary":"good, but I left a file behind","dod":[],"findings":[]}' ;;
+  preflight:dirty)
+    echo "junk" > stray-from-preflight.txt
+    echo "edited by preflight" >> plan/ENTRY.md
+    result "{\"report\":\"# Report from $role $n\\n\\nMARKER-REPORT\"}" ;;
   preflight:ok|final-review:ok)
     result "{\"report\":\"# Report from $role $n\\n\\nMARKER-REPORT\"}" ;;
   *)

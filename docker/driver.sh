@@ -227,6 +227,7 @@ run_review() {
   local logfile="$LOGS/$slug.review.r$round.log" t0 rc json jf mf counts
   t0=$(date +%s)
   log "Reviewer (round $round): fresh read-only context (log: $(rel "$logfile"))"
+  snapshot_tree
   run_agent "$logfile" review "$(review_prompt "$phase" "$base" "${GATE_LOG:-}")"; rc=$?
   render_log "$logfile"
   restore_tree "The reviewer"
@@ -267,6 +268,20 @@ mark_blocked() {
   die "phase $phase BLOCKED — $reason"
 }
 
+# blocked_or_verify PHASE SLUG SINCE REASON — a builder said "blocked". With no
+# new commits since SINCE that is an honest stop. With commits, the claim is not
+# authoritative: builders routinely finish the work, start the test suite in
+# the background, report "verification still running" as a blocker and end the
+# turn. The gate and the reviewer decide whether the work is done; a genuine
+# blocker shows up as a FAIL verdict and, at worst, one more blocked report
+# from the fix round with nothing new committed.
+blocked_or_verify() {
+  local phase="$1" slug="$2" since="$3" reason="$4"
+  [[ "$(git rev-parse HEAD)" != "$since" ]] || mark_blocked "$phase" "$reason"
+  BLOCKED_NOTE="$(cat "$REVIEWS/$slug.blocked.md" 2>/dev/null || true)"
+  warn "builder reported blocked but committed $(git rev-list --count "$since..HEAD") commit(s) — the gate and the reviewer decide, not the builder (its report: $(rel "$REVIEWS")/$slug.blocked.md)"
+}
+
 unblock() {
   [[ -f "$BLOCKED_FILE" ]] || return 0
   { grep -vF "$1"$'\t' "$BLOCKED_FILE" || true; } > "$BLOCKED_FILE.tmp"
@@ -275,10 +290,10 @@ unblock() {
 
 # ── One phase ─────────────────────────────────────────────────────────────────
 run_phase() {
-  local phase="$1" slug base round=0 reason logfile
+  local phase="$1" slug base round=0 reason logfile head_before
   slug="$(phase_slug "$phase")"
   phase_opts "$phase"
-  VERDICT=""; VERDICT_MD=""; BUILD_SID=""
+  VERDICT=""; VERDICT_MD=""; BUILD_SID=""; BLOCKED_NOTE=""
   log "Phase $phase: $(roles_desc)"
 
   if load_progress "$slug"; then
@@ -290,7 +305,7 @@ run_phase() {
     logfile="$LOGS/$slug.build.log"
     log "Phase $phase: BUILDER starting (log: $(rel "$logfile"))"
     run_builder "$phase" build 0 "$logfile" "$(build_prompt "$phase")" \
-      || mark_blocked "$phase" "builder reported blocked: $(jq -r '.summary // ""' <<<"$BUILDER_JSON" | head -c 300) — see $(rel "$REVIEWS")/$slug.blocked.md"
+      || blocked_or_verify "$phase" "$slug" "$base" "builder reported blocked: $(jq -r '.summary // ""' <<<"$BUILDER_JSON" | head -c 300) — see $(rel "$REVIEWS")/$slug.blocked.md"
     BUILD_SID="$LAST_SESSION_ID"
     save_progress "$slug" "$base" 0 "$BUILD_SID"
   fi
@@ -305,6 +320,10 @@ run_phase() {
     else
       break
     fi
+    if [[ -n "${BLOCKED_NOTE:-}" ]]; then
+      reason+=$'\n\n'"The previous builder ended its run reporting itself blocked. Its report follows; treat its claims as claims, not findings:"$'\n\n'"$BLOCKED_NOTE"
+      BLOCKED_NOTE=""
+    fi
 
     round=$(( round + 1 ))
     if (( round > MAX_FIX_ROUNDS )); then
@@ -312,8 +331,9 @@ run_phase() {
       mark_blocked "$phase" "still failing after $MAX_FIX_ROUNDS fix round(s) (last: ${VERDICT:-gate red}) — see $(rel "$REVIEWS")/$slug.md"
     fi
     logfile="$LOGS/$slug.fix.r$round.log"
+    head_before="$(git rev-parse HEAD)"
     run_fix "$phase" "$slug" "$round" "$logfile" "$reason" "$base" \
-      || mark_blocked "$phase" "builder reported blocked in fix round $round: $(jq -r '.summary // ""' <<<"$BUILDER_JSON" | head -c 300)"
+      || blocked_or_verify "$phase" "$slug" "$head_before" "builder reported blocked in fix round $round: $(jq -r '.summary // ""' <<<"$BUILDER_JSON" | head -c 300)"
     BUILD_SID="$LAST_SESSION_ID"
     save_progress "$slug" "$base" "$round" "$BUILD_SID"
   done
@@ -332,6 +352,7 @@ report_pass() {
   local role="$1" out="$2" prompt="$3" logfile="$LOGS/$1.log" t0 rc json
   t0=$(date +%s)
   log "$role: launching read-only agent (log: $(rel "$logfile"))"
+  snapshot_tree
   run_agent "$logfile" "$role" "$prompt"; rc=$?
   render_log "$logfile"
   restore_tree "The $role agent"

@@ -22,13 +22,31 @@ checkpoint_commit() {  # checkpoint_commit MESSAGE
 
 tree_is_clean() { [[ -z "$(git status --porcelain)" ]]; }
 
-# Read-only roles run on a fully committed tree, so anything they leave behind
-# (a stray edit, test artefacts) can be discarded without losing work.
+tree_status() { git status --porcelain --untracked-files=all | LC_ALL=C sort; }
+
+# Read-only roles must leave the tree as they found it. The tree is not
+# necessarily clean when they start: `preflight` may run while a failed builder's
+# uncommitted files sit in it. So restore_tree discards only what appeared
+# since snapshot_tree, never the work that was already there.
+snapshot_tree() { TREE_SNAPSHOT="$(tree_status)"; }
+
 restore_tree() {  # restore_tree WHO
-  tree_is_clean && return 0
+  local now new line path
+  now="$(tree_status)"
+  [[ "$now" == "${TREE_SNAPSHOT-}" ]] && return 0
+  new="$(LC_ALL=C comm -13 <(printf '%s\n' "${TREE_SNAPSHOT-}") <(printf '%s\n' "$now"))"
+  [[ -n "$new" ]] || return 0
   warn "$1 left changes in the working tree — discarding them:"
-  git status --short | sed 's/^/    /' >&2
-  git reset -q --hard HEAD && git clean -qfd
+  printf '%s\n' "$new" | sed 's/^/    /' >&2
+  while IFS= read -r line; do
+    path="${line:3}"; path="${path##* -> }"
+    if [[ "${line:0:2}" == "??" ]]; then
+      rm -rf -- "$path"
+    else
+      git reset -q -- "$path" 2>/dev/null || true
+      if git cat-file -e "HEAD:$path" 2>/dev/null; then git checkout -q -- "$path"; else rm -rf -- "$path"; fi
+    fi
+  done <<<"$new"
 }
 
 has_unpushed() {

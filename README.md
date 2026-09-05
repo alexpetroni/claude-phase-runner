@@ -109,9 +109,15 @@ current directory).
 file + `prompts/build.md`: execute exactly this phase, commit as you go, do not
 verify yourself, do not leave anything running in the background, return a
 structured report (`done` or `blocked`, summary, commits, blockers). A builder
-that reports `blocked` stops the run honestly: the work is checkpoint-committed
-and pushed, the phase is recorded in `state/blocked`, and
-`state/reviews/<phase>.blocked.md` holds its report.
+that reports `blocked` **without having committed anything** stops the run
+honestly: the phase is recorded in `state/blocked`, and
+`state/reviews/<phase>.blocked.md` holds its report. A `blocked` report *with*
+new commits is treated as a claim, not a verdict — builders routinely finish
+the work, start the suite in the background, report "verification still
+running" as a blocker and end the turn — so the phase goes through gate and
+review like any other, with the report attached to any fix round. A genuine
+blocker then surfaces as a `FAIL` and, at worst, one more blocked report from
+the fix round with nothing new committed, which does stop the run.
 
 **2. Checkpoint.** Anything the builder left uncommitted is committed as
 `chore(runner): checkpoint uncommitted work after <phase>`.
@@ -137,7 +143,9 @@ findings and concrete fixes; no style nits. `PASS` only if every DoD item holds
 and there is no critical or high finding. The verdict is structured JSON,
 rendered to `state/reviews/<phase>.md` (DoD table with evidence + findings). If
 the reviewer leaves anything in the working tree it is discarded — everything
-was committed before it ran.
+was committed before it ran. (Read-only passes only ever discard what they
+added themselves: `preflight` on a tree holding a failed builder's uncommitted
+files leaves those files alone.)
 
 **5. Fix rounds.** On a red gate or a `FAIL`, the builder comes back with the
 exact gate output or verdict and fixes forward, commits; then gate and reviewer
