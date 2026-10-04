@@ -31,8 +31,10 @@ cd ~/work/claude-phase-runner
 git switch -c improve/2026-10-hardening
 git add docs && git commit -m "docs: plan for the October 2026 hardening batch"
 
-# 3. check, then run — in tmux, with your key loaded (the push remote is SSH)
-eval "$(ssh-agent)"; ssh-add
+# 3. check, then run — in tmux. The push remote is SSH: `ssh-add -l` must list
+#    your key. A desktop keyring usually provides the agent already; do not start
+#    a new one with `ssh-agent`, which would be empty and make every push fail.
+ssh-add -l
 $PR build --dry-run        # prints the PHASE-0 builder prompt, launches no agent
 $PR build
 
