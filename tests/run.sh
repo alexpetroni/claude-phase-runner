@@ -539,6 +539,57 @@ assert_grep '^ +- \$\{HOST_DOCKER_SOCK:-/dev/null\}:/var/run/docker\.sock$' "$KI
 assert_not_grep '^ +- /var/run/docker\.sock:' "$KIT/docker-compose.yml"
 assert_grep '^DOCKER_SOCKET=0$' "$KIT/templates/runner.env"
 
+scenario "host CLI: the kit refuses to build itself; init/status/logs/reset still work there (fake docker)"
+# A copy of the kit that is also the project: its own bin/phase-runner is run
+# with --project pointing at the copy (via a symlink, to prove the comparison
+# is by directory and not by string).
+k="$TMP/kitcopy"
+mkdir -p "$k/plan" "$k/.phase-runner"
+cp -a "$KIT/bin" "$KIT/docker" "$KIT/prompts" "$KIT/templates" "$KIT/docker-compose.yml" "$k/"
+git -C "$k" init -q -b main
+printf '# Entry\n' > "$k/plan/ENTRY.md"; printf '# Phase A\n' > "$k/plan/A.md"
+printf 'ENTRY_FILE=plan/ENTRY.md\nPUSH=0\n' > "$k/.phase-runner/runner.env"
+printf 'plan/A.md\n' > "$k/.phase-runner/phases"
+ln -s "$k" "$TMP/kitcopy-link"
+self_run() {  # self_run ARG... → RC, OUT, FAKE_DOCKER
+  FAKE_DOCKER="$TMP/fakedocker-$RANDOM$RANDOM"; mkdir -p "$FAKE_DOCKER"
+  OUT="$TMP/out-$RANDOM$RANDOM.log"
+  PATH="$TMP/fakedocker:$PATH" FAKE_DOCKER="$FAKE_DOCKER" PHASE_RUNNER_CREDENTIALS="$TMP/creds.env" \
+    bash "$k/bin/phase-runner" --project "$TMP/kitcopy-link" "$@" >"$OUT" 2>&1 </dev/null
+  RC=$?
+}
+for cmd in "build" "build --dry-run" "dry-run" "preflight" "review"; do
+  # shellcheck disable=SC2086
+  self_run $cmd
+  assert_eq "$RC" 1 "rc ($cmd)"
+  assert_grep 'refusing to start a container with the kit as the project' "$OUT"
+  assert_grep 'mounted live into the run' "$OUT"
+  assert_grep 'frozen clone' "$OUT"
+  assert_grep "git clone $k " "$OUT"
+  assert_grep "--project $k(-link)? ${cmd%% *}" "$OUT"
+  assert_no_file "$FAKE_DOCKER/calls"
+done
+# No container needed, so these keep working on the kit-as-project.
+rm -rf "$k/.phase-runner"
+self_run init
+assert_eq "$RC" 0 "init rc"
+assert_file "$k/.phase-runner/runner.env"
+assert_file "$k/.phase-runner/phases"
+printf 'plan/A.md\n' > "$k/.phase-runner/phases"
+mkdir -p "$k/.phase-runner/state/logs"
+printf 'gate output\n' > "$k/.phase-runner/state/logs/A.md.gate.r0.log"
+self_run status
+assert_eq "$RC" 0 "status rc"
+assert_grep '^plan/A.md +pending' "$OUT"
+self_run logs A.md.gate
+assert_eq "$RC" 0 "logs rc"
+assert_grep '^gate output$' "$OUT"
+self_run reset --yes
+assert_eq "$RC" 0 "reset rc"
+assert_no_file "$k/.phase-runner/state"
+assert_file "$k/.phase-runner/runner.env"
+unset k cmd
+
 scenario "prompt rendering keeps && and $ literal"
 p="$(new_project render)"
 printf 'Gate: `a && b` costs $5 & more\n' > "$p/plan/ENTRY.md"

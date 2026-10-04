@@ -148,8 +148,24 @@ Next:
 EOF
 }
 
+# docker-compose.yml bind-mounts this kit's docker/ and prompts/ live into the
+# container. When the project IS the kit, the builder's edits land in the
+# running runner: driver.sh is executed incrementally from the file, prompts
+# are re-read per role and guard.sh is started fresh for every tool call — a
+# half-edited guard.sh exits 2 and blocks every call, including the repair.
+refuse_self_hosting() {
+  [[ "$PROJECT_DIR" -ef "$KIT_DIR" ]] || return 0
+  warn "The project is this kit itself: $PROJECT_DIR"
+  warn "The kit's docker/ and prompts/ are mounted live into the run, so the builder's edits would change the runner while it runs."
+  warn "Build the kit from a frozen clone instead:"
+  warn "    git clone $KIT_DIR /tmp/phase-runner-frozen"
+  warn "    /tmp/phase-runner-frozen/bin/phase-runner --project $PROJECT_DIR $CMD"
+  die "refusing to start a container with the kit as the project"
+}
+
 cmd_run() {  # cmd_run MODE
   resolve_project
+  refuse_self_hosting
   load_config
   resolve_credentials
   ensure_exclude
