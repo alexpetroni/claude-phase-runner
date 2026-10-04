@@ -55,6 +55,9 @@ MANIFEST="${RUNNER_MANIFEST:-$PROJECT_DIR/.phase-runner/phases}"
 # resumes at the gate instead of paying for the builder again.
 PROGRESS="$STATE/progress"
 mkdir -p "$PROGRESS"
+# 1 = the host Docker socket is mounted (bin/phase-runner decides the mount);
+# 0 = no daemon, and the builder is told so instead of hunting for one.
+DOCKER_SOCKET="${DOCKER_SOCKET:-1}"
 # Model/effort for every role unless runner.env overrides them (BUILD_*/REVIEW_* per role).
 CLAUDE_MODEL="${CLAUDE_MODEL:-claude-fable-5-1}"
 CLAUDE_EFFORT="${CLAUDE_EFFORT:-xhigh}"
@@ -107,7 +110,10 @@ load_progress()  {  # load_progress SLUG → sets P_BASE P_ROUND P_SID; 1 when a
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 entry_text() { cat "$ENTRY_FILE"; }
-rules_text() { render_prompt rules ENTRY_FILE="$ENTRY_FILE"; }
+rules_text() {
+  render_prompt rules ENTRY_FILE="$ENTRY_FILE"
+  [[ "$DOCKER_SOCKET" == "1" ]] || { echo; render_prompt no-docker; }
+}
 
 build_prompt() {  # build_prompt PHASE
   render_prompt build ENTRY="$(entry_text)" PHASE_FILE="$1" RULES="$(rules_text)"
@@ -371,7 +377,7 @@ log "Phase runner ($MODE) in $PROJECT_DIR — branch $GIT_BRANCH, remote $GIT_RE
 log "Phases: ${PHASES[*]}"
 log "Builder: $(role_desc build)${BUILD_BUDGET_USD:+, budget \$$BUILD_BUDGET_USD} · Fix rounds (≤ $MAX_FIX_ROUNDS, $FIX_CONTEXT context): $(role_desc fix) · Reviewer: $(onoff "$PHASE_REVIEW"), $(role_desc review)${REVIEW_BUDGET_USD:+, budget \$$REVIEW_BUDGET_USD} · gate: ${GATE_CMD:-none}"
 log "Subagents: ${SUBAGENT_MODEL:-inherit the parent model} · inline Bash output ≤ ${BASH_OUTPUT_MAX_CHARS:-30000 (Claude Code default)} chars · per-phase overrides: $([[ -f "$MANIFEST" ]] && echo "$(rel "$MANIFEST")" || echo none)"
-log "Retry schedule: ${SCHEDULE[*]}s; stall timeout: ${STALL_TIMEOUT}s; guard hook: $(onoff "$GUARD")"
+log "Retry schedule: ${SCHEDULE[*]}s; stall timeout: ${STALL_TIMEOUT}s; guard hook: $(onoff "$GUARD"); docker socket: $(onoff "$DOCKER_SOCKET")"
 
 case "$MODE" in
   dry-run)

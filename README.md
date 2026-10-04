@@ -41,10 +41,10 @@ docker/bootstrap.sh       root entrypoint: socket group, git identity, trust, dr
 docker/driver.sh          the phase loop: builder → gate → reviewer → fix rounds → push
 docker/lib/               claude.sh (roles, retries, watchdog) · git.sh · common.sh · renderers
 docker/guard.sh           the enforcement hook (per-role rules, tested)
-prompts/*.md              builder, fix (fresh or resumed), reviewer, preflight, final-review instructions — edit freely
+prompts/*.md              builder, fix (fresh or resumed), reviewer, preflight, final-review instructions, the rules and no-Docker notes — edit freely
 templates/                runner.env, phases, credentials.env starting points
 tests/                    bash tests/run.sh — driver, CLI and guard tests with a fake `claude`
-docker-compose.yml        container definition (same-path repo mount, DooD, agent home)
+docker-compose.yml        container definition (same-path repo mount, optional host Docker socket, agent home)
 
 <project>/.phase-runner/  created by `phase-runner init`, excluded via .git/info/exclude
   runner.env              per-project configuration
@@ -263,6 +263,7 @@ All paths are relative to the project root. Phases are listed in
 | `EXTRA_APT_PACKAGES` | empty | Extra apt packages baked into the image. |
 | `CLAUDE_CODE_VERSION` | `latest` | Pin the Claude Code version in the image. |
 | `AGENT_HOME` | `.phase-runner/home` | Mounted as the agent's `~/.claude`: put `skills/`, `agents/`, plugins there. Sessions persist here too. |
+| `DOCKER_SOCKET` | `1` | `1` mounts the host's Docker socket so the agent can run the project's stack and test containers on the host daemon. `0` mounts nothing: the agent has no daemon, runs everything as plain processes in the runner container, and reports `blocked` if a phase needs containers. The socket is effectively host-root, so the template ships `0` — see [Security model](#security-model--read-this-once). |
 | `REVIEW_PROMPT` | built-in | The final review's instruction (entry file still prepended). |
 | `GUARD` | `1` | `0` disables the enforcement hook. Not recommended. |
 
@@ -302,11 +303,13 @@ better the DoD, the better the verdict: "all 37 ported tests pass, none
 skipped" is checkable; "the engine works" is not. If a phase has no explicit
 DoD the reviewer derives one from the deliverables and says so.
 
-**Networking note for verification steps:** the agent starts the project's
-stack as *sibling* containers (docker-out-of-docker), so their published
-ports live on the **host** — from inside the runner container they are
-reachable at `host.docker.internal:PORT`, not `127.0.0.1`. Say so in the entry
-file if the agent has to curl its own services.
+**Networking note for verification steps:** with `DOCKER_SOCKET=1` the agent
+starts the project's stack as *sibling* containers (docker-out-of-docker), so
+their published ports live on the **host** — from inside the runner container
+they are reachable at `host.docker.internal:PORT`, not `127.0.0.1`. Say so in
+the entry file if the agent has to curl its own services. With
+`DOCKER_SOCKET=0` there are no containers: services are processes inside the
+runner container and `127.0.0.1` is correct.
 
 **MCP servers, skills, plugins.** A project `.mcp.json` is picked up
 automatically (the project is trusted at boot). User-level skills and agents go
@@ -398,8 +401,10 @@ tools, guard hook); the agent returns the report and the driver writes it.
   plugins, apt packages, and credentials each phase needs, and how to provision
   each — secrets into the credentials file, packages into
   `EXTRA_APT_PACKAGES`, skills into `.phase-runner/home/`, MCP servers into the
-  project's `.mcp.json`. The unattended runner cannot authenticate mid-build,
-  so anything needing a secret must be in place before launch.
+  project's `.mcp.json`, a Docker daemon via `DOCKER_SOCKET=1` (and
+  `DOCKER_SOCKET=0` when no phase needs containers). The unattended runner
+  cannot authenticate mid-build, so anything needing a secret must be in place
+  before launch.
 - `phase-runner review` after the build: a prioritized list of what to
   improve, simplify or harden, each item with severity and the concrete fix,
   written to `state/REVIEW.md`. Turn the findings you accept into new phase
@@ -426,15 +431,24 @@ the auth and re-run — the backlog is pushed first. `PUSH=0` disables pushing.
 - The container is a sandbox **against accidents**, which is what makes
   `--dangerously-skip-permissions` acceptable: the agent cannot trash your
   host filesystem or shell config.
-- It is **not** a hard boundary against a hostile agent: the mounted Docker
-  socket is effectively host-root and outbound network is open (the API,
-  registries and `git push` need it). The guard hook narrows what a *careless*
-  agent can do; it is not a security boundary either. If you need hard
-  containment, remove the socket mount and lose docker-first verification.
+- It is **not** a hard boundary against a hostile agent: outbound network is
+  open (the API, registries and `git push` need it), and the guard hook narrows
+  what a *careless* agent can do; it is not a security boundary either.
+- **The host Docker socket is the largest hole, and it is optional.** With
+  `DOCKER_SOCKET=1` the agent can start containers on the host daemon, which
+  is effectively host-root: a container it starts can mount any host path.
+  That is the price of docker-first verification (a compose stack, a database
+  or test containers). With `DOCKER_SOCKET=0` nothing is mounted (`/dev/null`
+  sits at the socket path) and the agent is left with the project directory,
+  its own home, the network and, when one is forwarded, the use of your SSH
+  agent. Projects created by `init` start at `0`; a `runner.env` without the setting keeps `1`, so existing projects
+  behave as before until you add the line. Set `0` wherever the phases and the
+  gate need no containers.
 - Nothing is published inbound.
 - Claude Code refuses to skip permissions as root, so `bootstrap.sh` starts as
-  root only to align the docker-socket group and drops to the non-root `node`
-  user (uid 1000, so file ownership matches the typical host user).
+  root only to align the docker-socket group (when the socket is mounted) and
+  drops to the non-root `node` user (uid 1000, so file ownership matches the
+  typical host user).
 - The agent's credentials are environment variables in the container; the
   project never sees the file.
 
@@ -449,6 +463,7 @@ the auth and re-run — the backlog is pushed first. `PUSH=0` disables pushing.
 | `push failed 3 times` | No SSH agent forwarded / bad token in the remote URL. Fix, re-run — the backlog pushes first. |
 | Killed as stalled during a long docker build / test suite | Raise `STALL_TIMEOUT`. The retry resumes the same session, so little is lost. |
 | Agent can't reach its own services on `127.0.0.1` | DooD: use `host.docker.internal:PORT`, or attach test containers to the app's compose network. |
+| `Cannot connect to the Docker daemon` in the transcript, or the builder reports blocked asking for `DOCKER_SOCKET=1` | The project runs with `DOCKER_SOCKET=0` (the template default). If its phases or gate really need containers, set `DOCKER_SOCKET=1` in `runner.env` and re-run. |
 | `guard … BLOCKED` lines in the transcript | Working as intended. If a legitimate command is caught, add a narrower rule + a test case in `tests/guard.sh`. |
 | A completed phase runs again | Its manifest path changed, or the state was reset. |
 | Need python/go/rust in the image | `EXTRA_APT_PACKAGES="python3 python3-pip"` in `runner.env`; the image rebuilds on the next run. |
@@ -471,8 +486,8 @@ out-of-credits stop, blocked builder, resume after an interruption (builder
 skipped), per-phase manifest options, per-role model/effort, subagent model
 and output cap, `FIX_CONTEXT=resume` with fallback, dry run, two phases,
 committed verdicts, reviewer leaving files, uncommitted leftovers, preflight,
-final review, the host CLI — plus every guard rule. Add a scenario with each
-behaviour change.
+final review, the host CLI, the `DOCKER_SOCKET` switch (with a fake `docker`)
+— plus every guard rule. Add a scenario with each behaviour change.
 
 ## Migrating from the old layout (kit-local `runner.env` + `state/`)
 

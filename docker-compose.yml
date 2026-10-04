@@ -1,6 +1,7 @@
 # Launched by bin/phase-runner, which exports the project's .phase-runner/runner.env
 # plus the computed variables (PROJECT_DIR, PHASE_FILES, CREDENTIALS_FILE,
-# AGENT_HOME, RUNNER_MODE, HOST_SSH_AUTH_SOCK) before calling compose.
+# AGENT_HOME, RUNNER_MODE, HOST_SSH_AUTH_SOCK, HOST_DOCKER_SOCK) before calling
+# compose.
 # Do not `docker compose run` this directly.
 services:
   runner:
@@ -49,6 +50,8 @@ services:
       GATE_TIMEOUT: ${GATE_TIMEOUT:-3600}
       LIMIT_WAIT_MAX: ${LIMIT_WAIT_MAX:-21600}
       GUARD: ${GUARD:-1}
+      # 1 = the host Docker socket is mounted below; 0 = the agent has no daemon
+      DOCKER_SOCKET: ${DOCKER_SOCKET:-0}
       # git
       GIT_REMOTE: ${GIT_REMOTE:-origin}
       GIT_BRANCH: ${GIT_BRANCH:-}
@@ -61,8 +64,11 @@ services:
       # against the host daemon (docker-out-of-docker). Runner state lives in
       # <project>/.phase-runner/state, inside this mount.
       - ${PROJECT_DIR}:${PROJECT_DIR}
-      # Host Docker daemon, for the project's stack + test containers.
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Host Docker daemon, for the project's stack + test containers — only
+      # with DOCKER_SOCKET=1: the socket is effectively root on the host. The
+      # CLI points this at the real socket then, and at /dev/null otherwise
+      # (also the fallback here, so a bare `docker compose run` gets no daemon).
+      - ${HOST_DOCKER_SOCK:-/dev/null}:/var/run/docker.sock
       # The agent's ~/.claude: drop skills/, agents/, plugins here; sessions
       # persist so interrupted runs can be resumed by id.
       - ${AGENT_HOME}:/home/node/.claude
@@ -74,9 +80,11 @@ services:
       - ./docker:/opt/phase-runner/docker:ro
       - ./prompts:/opt/phase-runner/prompts:ro
     working_dir: ${PROJECT_DIR}
-    # DooD means the project's stack runs as SIBLING containers with ports
-    # published on the host — 127.0.0.1 inside this container cannot reach
-    # them. host.docker.internal resolves to the host gateway instead.
+    # With the socket mounted (DooD) the project's stack runs as SIBLING
+    # containers with ports published on the host — 127.0.0.1 inside this
+    # container cannot reach them. host.docker.internal resolves to the host
+    # gateway instead. Without the socket, services are plain processes in
+    # this container and 127.0.0.1 is the right address.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     stdin_open: true

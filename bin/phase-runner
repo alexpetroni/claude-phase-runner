@@ -169,6 +169,17 @@ cmd_run() {  # cmd_run MODE
     fi
   fi
 
+  # The host's Docker socket lets the agent run the project's stack and test
+  # containers on the host daemon — and is effectively root on the host. Unset
+  # keeps it mounted (projects that predate the setting); 0 mounts /dev/null.
+  DOCKER_SOCKET="${DOCKER_SOCKET:-1}"
+  case "$DOCKER_SOCKET" in
+    1) HOST_DOCKER_SOCK=/var/run/docker.sock ;;
+    0) HOST_DOCKER_SOCK=/dev/null ;;
+    *) die "DOCKER_SOCKET must be 0 or 1 in $(rel "$CONFIG") (got '$DOCKER_SOCKET')" ;;
+  esac
+  export DOCKER_SOCKET HOST_DOCKER_SOCK
+
   export RUNNER_MODE="$1" PROJECT_DIR AGENT_HOME
   info "Project:   $PROJECT_DIR"
   info "Entry:     $ENTRY_FILE"
@@ -176,6 +187,11 @@ cmd_run() {  # cmd_run MODE
   info "Mode:      $1"
   info "Reviewer:  ${PHASE_REVIEW:-1} (fix rounds ≤ ${MAX_FIX_ROUNDS:-2}) · gate: ${GATE_CMD:-none}"
   info "Push:      ${PUSH:-1} → ${GIT_REMOTE:-origin}/${GIT_BRANCH:-<current>}"
+  if [[ "$DOCKER_SOCKET" == "1" ]]; then
+    info "Docker:    host socket mounted — the agent can drive the host daemon (DOCKER_SOCKET=0 turns it off)"
+  else
+    info "Docker:    no host socket — the agent has no Docker daemon (DOCKER_SOCKET=0)"
+  fi
   info "State:     $(rel "$STATE") · agent home: $(rel "$AGENT_HOME")"
 
   local compose=(docker compose -f "$KIT_DIR/docker-compose.yml")

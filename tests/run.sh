@@ -256,6 +256,20 @@ assert_eq "$RC" 0 "rc"
 assert_not_grep 'CLAUDE_CODE_SUBAGENT_MODEL' "$FAKE/1.env"
 assert_not_grep -- '--settings' "$FAKE/1.args"
 
+scenario "DOCKER_SOCKET=0 → builder and fix rounds are told there is no Docker daemon; the default says nothing"
+p="$(new_project nodocker)"
+DOCKER_SOCKET=0 run_driver "$p" build:ok review:FAIL fix:ok review:PASS
+assert_eq "$RC" 0 "rc"
+assert_grep 'No Docker in this run' "$FAKE/1.prompt"
+assert_grep 'report `blocked` and say the phase needs `DOCKER_SOCKET=1`' "$FAKE/1.prompt"
+assert_grep 'No Docker in this run' "$FAKE/3.prompt"
+assert_grep 'docker socket: off' "$OUT"
+p="$(new_project dockerdefault)"
+run_driver "$p" build:ok review:PASS
+assert_eq "$RC" 0 "rc (default)"
+assert_not_grep 'No Docker in this run' "$FAKE/1.prompt"
+assert_grep 'docker socket: on' "$OUT"
+
 scenario "per-phase options in the manifest override runner.env for that phase"
 p="$(new_project phaseopts)"
 mkdir -p "$p/.phase-runner"
@@ -450,6 +464,54 @@ assert_no_file "$FIXPASS_PROJECT/.phase-runner/state"
 assert_file "$FIXPASS_PROJECT/.phase-runner/runner.env"
 out="$(bash "$KIT/bin/phase-runner" --project "$p" bogus 2>&1)"; rc=$?
 assert_eq "$rc" 1 "unknown command rc"
+
+scenario "host CLI: DOCKER_SOCKET decides whether the host Docker socket is mounted (fake docker)"
+p="$(new_project clidocker)"
+mkdir -p "$p/.phase-runner" "$TMP/fakedocker"
+printf 'plan/A.md\n' > "$p/.phase-runner/phases"
+printf 'ANTHROPIC_API_KEY=test\n' > "$TMP/creds.env"
+cat > "$TMP/fakedocker/docker" <<'EOF'
+#!/usr/bin/env bash
+# Stands in for docker: records every call and, for `compose … run`, the two
+# variables docker-compose.yml interpolates for the socket.
+printf '%s\n' "$*" >> "$FAKE_DOCKER/calls"
+if [[ " $* " == *" run "* ]]; then
+  printf '%s\n' "${HOST_DOCKER_SOCK-unset}" > "$FAKE_DOCKER/sock"
+  printf '%s\n' "${DOCKER_SOCKET-unset}" > "$FAKE_DOCKER/setting"
+fi
+exit 0
+EOF
+chmod +x "$TMP/fakedocker/docker"
+cli_run() {  # cli_run [RUNNER_ENV_LINE...] → RC, OUT, FAKE_DOCKER (calls, sock, setting)
+  printf '%s\n' 'ENTRY_FILE=plan/ENTRY.md' 'PUSH=0' "$@" > "$p/.phase-runner/runner.env"
+  FAKE_DOCKER="$TMP/fakedocker-$RANDOM$RANDOM"; mkdir -p "$FAKE_DOCKER"
+  OUT="$TMP/out-$RANDOM$RANDOM.log"
+  env -u DOCKER_SOCKET PATH="$TMP/fakedocker:$PATH" FAKE_DOCKER="$FAKE_DOCKER" \
+    PHASE_RUNNER_CREDENTIALS="$TMP/creds.env" \
+    bash "$KIT/bin/phase-runner" --project "$p" build --dry-run >"$OUT" 2>&1 </dev/null
+  RC=$?
+}
+cli_run
+assert_eq "$RC" 0 "rc (unset)"
+assert_eq "$(cat "$FAKE_DOCKER/sock" 2>/dev/null)" /var/run/docker.sock "unset keeps the socket (projects that predate the setting)"
+assert_eq "$(cat "$FAKE_DOCKER/setting" 2>/dev/null)" 1 "the container is told (unset)"
+assert_grep 'Docker: +host socket mounted' "$OUT"
+cli_run DOCKER_SOCKET=1
+assert_eq "$(cat "$FAKE_DOCKER/sock" 2>/dev/null)" /var/run/docker.sock "DOCKER_SOCKET=1"
+cli_run DOCKER_SOCKET=0
+assert_eq "$RC" 0 "rc (0)"
+assert_eq "$(cat "$FAKE_DOCKER/sock" 2>/dev/null)" /dev/null "DOCKER_SOCKET=0 mounts /dev/null in the socket's place"
+assert_eq "$(cat "$FAKE_DOCKER/setting" 2>/dev/null)" 0 "the container is told (0)"
+assert_grep 'Docker: +no host socket' "$OUT"
+cli_run DOCKER_SOCKET=yes
+assert_eq "$RC" 1 "rc (invalid value)"
+assert_grep 'DOCKER_SOCKET must be 0 or 1' "$OUT"
+assert_no_file "$FAKE_DOCKER/calls"
+# The wiring the fake cannot see: compose mounts what the CLI computed and
+# never the socket unconditionally; new projects start without it.
+assert_grep '^ +- \$\{HOST_DOCKER_SOCK:-/dev/null\}:/var/run/docker\.sock$' "$KIT/docker-compose.yml"
+assert_not_grep '^ +- /var/run/docker\.sock:' "$KIT/docker-compose.yml"
+assert_grep '^DOCKER_SOCKET=0$' "$KIT/templates/runner.env"
 
 scenario "prompt rendering keeps && and $ literal"
 p="$(new_project render)"

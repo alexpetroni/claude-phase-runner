@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Container entrypoint. Starts as root to align the Docker socket group, then
-# drops to the non-root `node` user (uid 1000 — matches the typical host repo
-# owner) to run the driver. Claude Code refuses --dangerously-skip-permissions
-# as root, hence the privilege drop. The container is sandboxed, so skipping
-# permissions is acceptable here (see README, "Security model").
+# Container entrypoint. Starts as root to align the Docker socket group (when
+# the socket is mounted, DOCKER_SOCKET=1), then drops to the non-root `node`
+# user (uid 1000 — matches the typical host repo owner) to run the driver.
+# Claude Code refuses --dangerously-skip-permissions as root, hence the
+# privilege drop. The container is sandboxed, so skipping permissions is
+# acceptable here (see README, "Security model").
 set -euo pipefail
 
 cd "${PROJECT_DIR:?PROJECT_DIR is not set}"
@@ -24,7 +25,10 @@ else
 fi
 
 # ── Grant the `node` user access to the host Docker socket (DooD) ──
-if [[ -S /var/run/docker.sock ]]; then
+# DOCKER_SOCKET=0: the CLI mounted /dev/null in the socket's place on purpose.
+if [[ "${DOCKER_SOCKET:-1}" != "1" ]]; then
+  echo "✓ No Docker socket (DOCKER_SOCKET=0) — the agent cannot reach the host daemon."
+elif [[ -S /var/run/docker.sock ]]; then
   SOCK_GID="$(stat -c '%g' /var/run/docker.sock)"
   if ! getent group "$SOCK_GID" >/dev/null; then
     groupadd -g "$SOCK_GID" dockerhost
