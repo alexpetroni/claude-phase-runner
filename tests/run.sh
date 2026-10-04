@@ -2,7 +2,18 @@
 # Driver + CLI tests without Docker or tokens: a fake `claude` on PATH plays
 # the builder and the reviewer according to a per-scenario plan.
 #   bash tests/run.sh            # all scenarios + guard tests
+# The result depends only on PATH, HOME and TMPDIR: the caller's environment
+# is discarded (see below), so the runner's own variables — exported inside a
+# runner container, or on a developer machine — cannot change what a scenario
+# asserts or sleep on an inherited RETRY_SCHEDULE.
 set -uo pipefail
+if [[ -z "${PHASE_RUNNER_TESTS_CLEAN:-}" ]]; then
+  # Re-exec once under a clean environment. Scenario-level prefix assignments
+  # (`CLAUDE_MODEL=x run_driver …`) are the only configuration from here on.
+  clean=(PATH="$PATH" HOME="$HOME" PHASE_RUNNER_TESTS_CLEAN=1)
+  [[ -n "${TMPDIR:-}" ]] && clean+=(TMPDIR="$TMPDIR")
+  exec env -i "${clean[@]}" bash "${BASH_SOURCE[0]}" "$@"
+fi
 KIT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/phase-runner-tests.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
@@ -54,6 +65,21 @@ arg_after() {  # arg_after N FLAG → the value following FLAG in invocation N
 }
 
 # ── Scenarios ────────────────────────────────────────────────────────────────
+scenario "canary: no runner variable reaches the scenarios' environment"
+# Every setting the container hands to the driver (the keys under
+# `environment:` in docker-compose.yml, read from the file so a setting added
+# later is covered) plus what the driver sets for agents and tests.
+mapfile -t runner_vars < <(sed -n '/^ *environment:/,/^ *volumes:/p' "$KIT/docker-compose.yml" \
+  | sed -nE 's/^ +([A-Z_]+):.*/\1/p')
+runner_vars+=(PHASE_RUNNER_ROLE PHASE_RUNNER_PROTECTED RUNNER_STATE RUNNER_MANIFEST FAKE_PLAN FAKE_LOG)
+for v in PHASE_FILES GATE_CMD RETRY_SCHEDULE CLAUDE_MODEL DOCKER_SOCKET; do
+  printf '%s\n' "${runner_vars[@]}" | grep -qx "$v" && ok || bad "$v missing from the list read from docker-compose.yml"
+done
+for v in "${runner_vars[@]}"; do
+  [[ -z "${!v+set}" ]] && ok || bad "$v is set in the suite's environment (value '${!v}')"
+done
+unset v runner_vars
+
 scenario "happy path: build → gate → review PASS"
 p="$(new_project happy)"
 run_driver "$p" build:ok review:PASS
