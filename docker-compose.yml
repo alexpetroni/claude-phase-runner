@@ -50,6 +50,10 @@ services:
       GATE_TIMEOUT: ${GATE_TIMEOUT:-3600}
       LIMIT_WAIT_MAX: ${LIMIT_WAIT_MAX:-21600}
       GUARD: ${GUARD:-1}
+      # the agent's Bash tool: foreground timeouts (seconds) and background tasks
+      BASH_TIMEOUT: ${BASH_TIMEOUT:-}
+      BASH_TIMEOUT_MAX: ${BASH_TIMEOUT_MAX:-}
+      BACKGROUND_TASKS: ${BACKGROUND_TASKS:-0}
       # 1 = the host Docker socket is mounted below; 0 = the agent has no daemon
       DOCKER_SOCKET: ${DOCKER_SOCKET:-0}
       # git

@@ -5,7 +5,7 @@ Hard rules — a hook blocks these calls, so do not try to work around them:
 - No `sudo`, no host-level docker prune. If the image lacks a package, say so in the blocker report.
 
 Working rules:
-- Do not leave commands running in the background and do not end your turn while anything is still running. This is a headless run: when your turn ends the process exits, and unfinished verification counts as not done.
+- Every command runs in the foreground. Give a slow one an explicit `timeout`, up to {{BASH_MAX_MINUTES}} minutes; a command that cannot finish inside that maximum is split into smaller runs or reported, never backgrounded. Never use `run_in_background` and never end your turn to wait for a result: in this run no notification ever arrives, and the turn ending is the end of the run, so unfinished verification counts as not done. A server or watcher the work needs is started with the shell's `&` and a log file, polled for readiness with a bounded retry, and stopped before you finish.
 - Do not spawn subagents to verify or review your own work, and do not write verification verdicts or "PASS" files. An independent reviewer with a fresh context does that after you finish; self-issued verdicts are ignored. Spend the effort on the work itself.
 - Never fake a green result: never skip, weaken, or delete a test to make it pass, never delete or soften a Definition of Done item, never claim a command succeeded without having run it to completion in this run.
 - Commit as you go with conventional-commit messages. One logical change per commit.

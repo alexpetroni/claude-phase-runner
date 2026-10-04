@@ -21,7 +21,7 @@ done
 printf '%s' "$prompt" > "$FAKE_LOG/$n.prompt"
 role="${PHASE_RUNNER_ROLE:-}"
 echo "$role" > "$FAKE_LOG/$n.role"
-env | grep -E '^CLAUDE_CODE_' > "$FAKE_LOG/$n.env" || true
+env | grep -E '^(CLAUDE_CODE_|BASH_DEFAULT_TIMEOUT_MS=|BASH_MAX_TIMEOUT_MS=)' > "$FAKE_LOG/$n.env" || true
 
 line="$(head -n1 "$FAKE_PLAN")"
 sed -i '1d' "$FAKE_PLAN"

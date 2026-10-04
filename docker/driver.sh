@@ -66,6 +66,7 @@ CLAUDE_EFFORT="${CLAUDE_EFFORT:-xhigh}"
 for p in "${PHASES[@]}"; do
   [[ -f "$p" ]] || die "phase file not found: $p (paths are relative to the project root)"
 done
+resolve_bash_settings   # validates explicit BASH_TIMEOUT / BASH_TIMEOUT_MAX / BACKGROUND_TASKS before any agent runs
 
 # Paths the agent may read but never modify (enforced by docker/guard.sh).
 PROTECTED_PATHS="$ENTRY_FILE:$(IFS=:; printf '%s' "${PHASES[*]}"):.phase-runner"
@@ -111,7 +112,7 @@ load_progress()  {  # load_progress SLUG → sets P_BASE P_ROUND P_SID; 1 when a
 # ── Prompts ───────────────────────────────────────────────────────────────────
 entry_text() { cat "$ENTRY_FILE"; }
 rules_text() {
-  render_prompt rules ENTRY_FILE="$ENTRY_FILE"
+  render_prompt rules ENTRY_FILE="$ENTRY_FILE" BASH_MAX_MINUTES="$(( BASH_TIMEOUT_MAX / 60 ))"
   [[ "$DOCKER_SOCKET" == "1" ]] || { echo; render_prompt no-docker; }
 }
 
@@ -143,7 +144,7 @@ review_prompt() {  # review_prompt PHASE BASE GATE_LOG
     gate="No gate command is configured for this project, so nothing has verified the suite yet: run the project's own checks yourself (tests, type check, lint, build — as the entry prompt describes them), once, and treat their output as your evidence."
   fi
   render_prompt review ENTRY="$(entry_text)" PHASE_FILE="$1" DIFF_RANGE="${2:0:12}..HEAD" \
-    COMMITS="$commits" DIFFSTAT="$diffstat" GATE_SECTION="$gate"
+    COMMITS="$commits" DIFFSTAT="$diffstat" GATE_SECTION="$gate" BASH_MAX_MINUTES="$(( BASH_TIMEOUT_MAX / 60 ))"
 }
 
 preflight_prompt() {
@@ -378,6 +379,7 @@ log "Phases: ${PHASES[*]}"
 log "Builder: $(role_desc build)${BUILD_BUDGET_USD:+, budget \$$BUILD_BUDGET_USD} · Fix rounds (≤ $MAX_FIX_ROUNDS, $FIX_CONTEXT context): $(role_desc fix) · Reviewer: $(onoff "$PHASE_REVIEW"), $(role_desc review)${REVIEW_BUDGET_USD:+, budget \$$REVIEW_BUDGET_USD} · gate: ${GATE_CMD:-none}"
 log "Subagents: ${SUBAGENT_MODEL:-inherit the parent model} · inline Bash output ≤ ${BASH_OUTPUT_MAX_CHARS:-30000 (Claude Code default)} chars · per-phase overrides: $([[ -f "$MANIFEST" ]] && echo "$(rel "$MANIFEST")" || echo none)"
 log "Retry schedule: ${SCHEDULE[*]}s; stall timeout: ${STALL_TIMEOUT}s; guard hook: $(onoff "$GUARD"); docker socket: $(onoff "$DOCKER_SOCKET")"
+log "Bash tool: default timeout ${BASH_TIMEOUT}s, maximum ${BASH_TIMEOUT_MAX}s; background tasks: $(onoff "$BACKGROUND_TASKS")"
 
 case "$MODE" in
   dry-run)

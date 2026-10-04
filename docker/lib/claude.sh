@@ -31,6 +31,43 @@ SUBAGENT_MODEL="${SUBAGENT_MODEL:-}"
 BASH_OUTPUT_MAX_CHARS="${BASH_OUTPUT_MAX_CHARS:-}"
 # Longest wait for a subscription usage window to reset before giving up.
 LIMIT_WAIT_MAX="${LIMIT_WAIT_MAX:-21600}"
+# The agent's Bash tool. A command that outruns its timeout is moved to the
+# background by Claude Code, and in a headless run the agent then ends its
+# turn waiting for a notification that never comes (README "What happens in a
+# phase"). So: a long default timeout, a maximum that stays under the stall
+# watchdog (a foreground command prints nothing while it runs), and
+# background tasks off. Seconds; the explicit values are kept apart from the
+# resolved ones so that only what the project set is validated.
+BASH_TIMEOUT_SET="${BASH_TIMEOUT:-}"
+BASH_TIMEOUT_MAX_SET="${BASH_TIMEOUT_MAX:-}"
+BACKGROUND_TASKS="${BACKGROUND_TASKS:-0}"
+
+# resolve_bash_settings — dies naming the setting, its value and the rule when
+# an explicit value is invalid; fills BASH_TIMEOUT and BASH_TIMEOUT_MAX.
+# Derived defaults never stop a run: BASH_TIMEOUT_MAX falls back to
+# STALL_TIMEOUT - 300 (never below 120), BASH_TIMEOUT to 600 capped at the max.
+resolve_bash_settings() {
+  local v
+  for v in BASH_TIMEOUT_SET BASH_TIMEOUT_MAX_SET; do
+    [[ -z "${!v}" || "${!v}" =~ ^[1-9][0-9]*$ ]] || die "${v%_SET}=${!v}: must be a positive integer (seconds)"
+  done
+  [[ "$BACKGROUND_TASKS" =~ ^[01]$ ]] || die "BACKGROUND_TASKS=$BACKGROUND_TASKS: must be 0 or 1"
+  if [[ -n "$BASH_TIMEOUT_MAX_SET" ]]; then
+    (( BASH_TIMEOUT_MAX_SET < STALL_TIMEOUT )) || die "BASH_TIMEOUT_MAX=$BASH_TIMEOUT_MAX_SET: must be below STALL_TIMEOUT ($STALL_TIMEOUT) — the watchdog kills an agent that prints nothing for that long, and a foreground command prints nothing until it ends"
+    BASH_TIMEOUT_MAX="$BASH_TIMEOUT_MAX_SET"
+  else
+    BASH_TIMEOUT_MAX=$(( STALL_TIMEOUT - 300 ))
+    (( BASH_TIMEOUT_MAX < 120 )) && BASH_TIMEOUT_MAX=120
+  fi
+  if [[ -n "$BASH_TIMEOUT_SET" ]]; then
+    (( BASH_TIMEOUT_SET <= BASH_TIMEOUT_MAX )) || die "BASH_TIMEOUT=$BASH_TIMEOUT_SET: must not be above BASH_TIMEOUT_MAX ($BASH_TIMEOUT_MAX)"
+    BASH_TIMEOUT="$BASH_TIMEOUT_SET"
+  else
+    BASH_TIMEOUT=600
+    (( BASH_TIMEOUT > BASH_TIMEOUT_MAX )) && BASH_TIMEOUT="$BASH_TIMEOUT_MAX"
+  fi
+  return 0
+}
 
 EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
 
@@ -107,6 +144,8 @@ run_claude() {
 
   local env=(PHASE_RUNNER_ROLE="$role" PHASE_RUNNER_PROTECTED="${PROTECTED_PATHS:-}" PROJECT_DIR="$PROJECT_DIR")
   [[ -n "$SUBAGENT_MODEL" ]] && env+=(CLAUDE_CODE_SUBAGENT_MODEL="$SUBAGENT_MODEL")
+  env+=(BASH_DEFAULT_TIMEOUT_MS=$(( BASH_TIMEOUT * 1000 )) BASH_MAX_TIMEOUT_MS=$(( BASH_TIMEOUT_MAX * 1000 )))
+  [[ "$BACKGROUND_TASKS" == "0" ]] && env+=(CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1)
   env "${env[@]}" claude "${args[@]}" -p "$prompt" >>"$logfile" 2>&1 &
   pid=$!
 

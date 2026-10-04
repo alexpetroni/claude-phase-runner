@@ -256,6 +256,7 @@ assert_grep 'DRY RUN' "$OUT"
 assert_grep 'BUILDER for exactly one phase: `plan/A.md`' "$OUT"
 assert_grep 'Be good' "$OUT"
 assert_grep 'Phase plan/A.md: builder model claude-fable-5-1, effort xhigh · fix model claude-fable-5-1, effort xhigh · reviewer model claude-fable-5-1, effort xhigh' "$OUT"
+assert_grep 'Bash tool: default timeout 300s, maximum 300s; background tasks: off' "$OUT"   # STALL_TIMEOUT=600 → max 300, default capped
 
 scenario "model/effort: CLAUDE_* for every role, BUILD_*/FIX_*/REVIEW_* per role, subagent model, output cap"
 p="$(new_project models)"
@@ -295,6 +296,92 @@ run_driver "$p" build:ok review:PASS
 assert_eq "$RC" 0 "rc (default)"
 assert_not_grep 'No Docker in this run' "$FAKE/1.prompt"
 assert_grep 'docker socket: on' "$OUT"
+
+scenario "Bash tool defaults: every role gets 600s/1500s and background tasks off; prompts say 25 minutes"
+p="$(new_project bashdefaults)"
+STALL_TIMEOUT=1800 run_driver "$p" build:ok review:FAIL fix:ok review:PASS
+assert_eq "$RC" 0 "rc"
+assert_eq "$(cat "$FAKE/3.role")" fix "role 3"
+for n in 1 2 3 4; do
+  assert_grep '^BASH_DEFAULT_TIMEOUT_MS=600000$' "$FAKE/$n.env"
+  assert_grep '^BASH_MAX_TIMEOUT_MS=1500000$' "$FAKE/$n.env"
+  assert_grep '^CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1$' "$FAKE/$n.env"
+done
+assert_grep 'Bash tool: default timeout 600s, maximum 1500s; background tasks: off' "$OUT"
+for n in 1 3; do   # builder and fix prompts carry the rules block
+  assert_grep 'Every command runs in the foreground' "$FAKE/$n.prompt"
+  assert_grep 'explicit `timeout`, up to 25 minutes' "$FAKE/$n.prompt"
+  assert_grep 'Never use `run_in_background` and never end your turn to wait' "$FAKE/$n.prompt"
+  assert_grep 'started with the shell.s `&` and a log file' "$FAKE/$n.prompt"
+  assert_not_grep 'Do not leave commands running in the background' "$FAKE/$n.prompt"
+done
+assert_grep 'never with `run_in_background`, and never end your turn to wait' "$FAKE/2.prompt"
+assert_grep 'up to 25 minutes' "$FAKE/2.prompt"
+assert_not_grep 'Every command runs in the foreground' "$FAKE/2.prompt"   # the reviewer gets the one-sentence version, not the rules block
+p="$(new_project bashpreflight)"
+STALL_TIMEOUT=1800 RUNNER_MODE=preflight run_driver "$p" preflight:ok
+assert_eq "$RC" 0 "rc (preflight)"
+assert_grep '^BASH_DEFAULT_TIMEOUT_MS=600000$' "$FAKE/1.env"
+assert_grep '^BASH_MAX_TIMEOUT_MS=1500000$' "$FAKE/1.env"
+assert_grep '^CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1$' "$FAKE/1.env"
+p="$(new_project bashfinal)"
+STALL_TIMEOUT=1800 RUNNER_MODE=review run_driver "$p" final-review:ok
+assert_eq "$RC" 0 "rc (final review)"
+assert_grep '^BASH_DEFAULT_TIMEOUT_MS=600000$' "$FAKE/1.env"
+assert_grep '^BASH_MAX_TIMEOUT_MS=1500000$' "$FAKE/1.env"
+assert_grep '^CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1$' "$FAKE/1.env"
+
+scenario "Bash tool: explicit timeouts reach the process in ms; BACKGROUND_TASKS=1 sets nothing; prompts state the maximum"
+p="$(new_project bashexplicit)"
+BASH_TIMEOUT=90 BASH_TIMEOUT_MAX=300 BACKGROUND_TASKS=1 run_driver "$p" build:ok review:PASS
+assert_eq "$RC" 0 "rc"
+for n in 1 2; do
+  assert_grep '^BASH_DEFAULT_TIMEOUT_MS=90000$' "$FAKE/$n.env"
+  assert_grep '^BASH_MAX_TIMEOUT_MS=300000$' "$FAKE/$n.env"
+  assert_not_grep 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS' "$FAKE/$n.env"
+  assert_grep 'up to 5 minutes' "$FAKE/$n.prompt"
+done
+assert_grep 'Bash tool: default timeout 90s, maximum 300s; background tasks: on' "$OUT"
+
+scenario "Bash tool: derived defaults follow a small STALL_TIMEOUT and never stop the run"
+p="$(new_project bashderived700)"
+STALL_TIMEOUT=700 run_driver "$p" build:ok review:PASS
+assert_eq "$RC" 0 "rc (700)"
+assert_grep '^BASH_DEFAULT_TIMEOUT_MS=400000$' "$FAKE/1.env"
+assert_grep '^BASH_MAX_TIMEOUT_MS=400000$' "$FAKE/1.env"
+assert_grep 'Bash tool: default timeout 400s, maximum 400s; background tasks: off' "$OUT"
+assert_grep 'up to 6 minutes' "$FAKE/1.prompt"   # 400s, rounded down so the stated maximum is never above the real one
+p="$(new_project bashderived200)"
+STALL_TIMEOUT=200 run_driver "$p" build:ok review:PASS
+assert_eq "$RC" 0 "rc (200)"
+assert_grep '^BASH_DEFAULT_TIMEOUT_MS=120000$' "$FAKE/1.env"
+assert_grep '^BASH_MAX_TIMEOUT_MS=120000$' "$FAKE/1.env"
+assert_grep 'Bash tool: default timeout 120s, maximum 120s; background tasks: off' "$OUT"
+assert_grep 'up to 2 minutes' "$FAKE/1.prompt"
+
+scenario "Bash tool: an invalid explicit setting stops the run before any agent and names the setting"
+p="$(new_project bashinvalid)"
+BASH_TIMEOUT=abc run_driver "$p" build:ok review:PASS
+assert_eq "$RC" 1 "rc (BASH_TIMEOUT=abc)"
+assert_eq "$(invocations)" 0 "invocations (BASH_TIMEOUT=abc)"
+assert_grep 'BASH_TIMEOUT=abc: must be a positive integer' "$OUT"
+BASH_TIMEOUT=0 run_driver "$p" build:ok review:PASS
+assert_eq "$RC" 1 "rc (BASH_TIMEOUT=0)"
+assert_eq "$(invocations)" 0 "invocations (BASH_TIMEOUT=0)"
+assert_grep 'BASH_TIMEOUT=0: must be a positive integer' "$OUT"
+BASH_TIMEOUT=900 BASH_TIMEOUT_MAX=600 STALL_TIMEOUT=1800 run_driver "$p" build:ok review:PASS
+assert_eq "$RC" 1 "rc (BASH_TIMEOUT above max)"
+assert_eq "$(invocations)" 0 "invocations (BASH_TIMEOUT above max)"
+assert_grep 'BASH_TIMEOUT=900: must not be above BASH_TIMEOUT_MAX \(600\)' "$OUT"
+STALL_TIMEOUT=1800 BASH_TIMEOUT_MAX=1800 run_driver "$p" build:ok review:PASS
+assert_eq "$RC" 1 "rc (BASH_TIMEOUT_MAX not below STALL_TIMEOUT)"
+assert_eq "$(invocations)" 0 "invocations (BASH_TIMEOUT_MAX not below STALL_TIMEOUT)"
+assert_grep 'BASH_TIMEOUT_MAX=1800: must be below STALL_TIMEOUT \(1800\)' "$OUT"
+BACKGROUND_TASKS=yes run_driver "$p" build:ok review:PASS
+assert_eq "$RC" 1 "rc (BACKGROUND_TASKS=yes)"
+assert_eq "$(invocations)" 0 "invocations (BACKGROUND_TASKS=yes)"
+assert_grep 'BACKGROUND_TASKS=yes: must be 0 or 1' "$OUT"
+assert_not_grep 'plan/A.md' "$STATE/phases-done"
 
 scenario "per-phase options in the manifest override runner.env for that phase"
 p="$(new_project phaseopts)"
