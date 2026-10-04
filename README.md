@@ -464,6 +464,7 @@ the auth and re-run — the backlog is pushed first. `PUSH=0` disables pushing.
 | Killed as stalled during a long docker build / test suite | Raise `STALL_TIMEOUT`. The retry resumes the same session, so little is lost. |
 | Agent can't reach its own services on `127.0.0.1` | DooD: use `host.docker.internal:PORT`, or attach test containers to the app's compose network. |
 | `Cannot connect to the Docker daemon` in the transcript, or the builder reports blocked asking for `DOCKER_SOCKET=1` | The project runs with `DOCKER_SOCKET=0` (the template default). If its phases or gate really need containers, set `DOCKER_SOCKET=1` in `runner.env` and re-run. |
+| `refusing to start a container with the kit as the project` | The project directory is the kit itself, whose code is mounted live into the run. Run a frozen clone's `bin/phase-runner` with `--project` pointing here, see [Building the kit with the kit](#building-the-kit-with-the-kit). |
 | `guard … BLOCKED` lines in the transcript | Working as intended. If a legitimate command is caught, add a narrower rule + a test case in `tests/guard.sh`. |
 | A completed phase runs again | Its manifest path changed, or the state was reset. |
 | Need python/go/rust in the image | `EXTRA_APT_PACKAGES="python3 python3-pip"` in `runner.env`; the image rebuilds on the next run. |
@@ -486,8 +487,34 @@ out-of-credits stop, blocked builder, resume after an interruption (builder
 skipped), per-phase manifest options, per-role model/effort, subagent model
 and output cap, `FIX_CONTEXT=resume` with fallback, dry run, two phases,
 committed verdicts, reviewer leaving files, uncommitted leftovers, preflight,
-final review, the host CLI, the `DOCKER_SOCKET` switch (with a fake `docker`)
-— plus every guard rule. Add a scenario with each behaviour change.
+final review, the host CLI, the `DOCKER_SOCKET` switch (with a fake `docker`),
+the CLI refusing to build the kit itself — plus every guard rule. The suite
+ignores the caller's environment: it re-executes itself once under `env -i`
+with only `PATH`, `HOME` and `TMPDIR`, so exported runner settings (inside a
+runner container, or on your machine) cannot change what a scenario asserts;
+a canary scenario at the start checks that none of the `environment:` keys of
+`docker-compose.yml` is present. Add a scenario with each behaviour change.
+
+### Building the kit with the kit
+
+`docker-compose.yml` mounts the kit's own `docker/` and `prompts/` live into
+the container, so when the project being built is the kit directory itself,
+the builder's edits change the runner while it runs: `driver.sh` is executed
+incrementally from the file, prompts are re-read for every role, and a
+half-edited `guard.sh` exits 2 and blocks every tool call, including the one
+that would repair it. `bin/phase-runner` therefore refuses `build`,
+`preflight` and `review` when the project and the kit are the same directory
+(`init`, `status`, `logs` and `reset` still work). Run the kit from a frozen
+clone instead:
+
+```bash
+git clone /path/to/claude-phase-runner /tmp/phase-runner-frozen
+/tmp/phase-runner-frozen/bin/phase-runner --project /path/to/claude-phase-runner build
+```
+
+The clone is what runs; the checkout under `--project` is what gets edited,
+committed and pushed. Re-clone (or `git pull` in the clone) when you want the
+runner to pick up kit changes.
 
 ## Migrating from the old layout (kit-local `runner.env` + `state/`)
 
