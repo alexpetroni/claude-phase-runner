@@ -112,12 +112,31 @@ structured report (`done` or `blocked`, summary, commits, blockers). A builder
 that reports `blocked` **without having committed anything** stops the run
 honestly: the phase is recorded in `state/blocked`, and
 `state/reviews/<phase>.blocked.md` holds its report. A `blocked` report *with*
-new commits is treated as a claim, not a verdict — builders routinely finish
+new commits is treated as a claim, not a verdict — builders used to finish
 the work, start the suite in the background, report "verification still
 running" as a blocker and end the turn — so the phase goes through gate and
 review like any other, with the report attached to any fix round. A genuine
 blocker then surfaces as a `FAIL` and, at worst, one more blocked report from
 the fix round with nothing new committed, which does stop the run.
+
+The runner removes the cause of that pattern rather than only catching it.
+Claude Code moves a Bash call that outruns its timeout (120 s by default) to
+the background and tells the agent it "will be notified when it completes";
+in a headless `claude -p` run nothing ever does, and the turn ending is the
+end of the run. So every role's `claude` process gets a long default timeout
+(`BASH_TIMEOUT`, 600 s), a maximum the agent may ask for that stays under the
+stall watchdog (`BASH_TIMEOUT_MAX`, `STALL_TIMEOUT` − 300 s), and Claude
+Code's background tasks switched off (`BACKGROUND_TASKS=0`:
+`run_in_background` and the automatic move to the background both disabled).
+The rules block tells the agent the same thing: run everything in the
+foreground with an explicit `timeout` up to the maximum, start a server it
+needs with the shell's `&` and stop it before finishing, and split or report a
+command that cannot finish in time. The driver validates explicit values at
+start-up and prints the resolved ones in its banner (`Bash tool: default
+timeout 600s, maximum 1500s; background tasks: off`). The switches
+(`BASH_DEFAULT_TIMEOUT_MS`, `BASH_MAX_TIMEOUT_MS`,
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`) were checked against Claude Code
+2.1.263.
 
 **2. Checkpoint.** Anything the builder left uncommitted is committed as
 `chore(runner): checkpoint uncommitted work after <phase>`.
@@ -256,7 +275,10 @@ All paths are relative to the project root. Phases are listed in
 | `BUILD_BUDGET_USD`, `REVIEW_BUDGET_USD` | none | Hard spend cap per agent run. |
 | `RETRY_SCHEDULE` | `30 300 3600 10800` | Seconds before each retry after a transient failure. The list's length is the retry count. |
 | `LIMIT_WAIT_MAX` | `21600` | Longest wait for a subscription usage window to reset before the run gives up. |
-| `STALL_TIMEOUT` | `1800` | Kill + retry an agent that printed nothing for this long. Keep above your slowest silent step. |
+| `STALL_TIMEOUT` | `1800` | Kill + retry an agent that printed nothing for this long. Keep above your slowest silent step: a foreground Bash call prints nothing until it ends, so it also bounds `BASH_TIMEOUT_MAX` (the derived default is `STALL_TIMEOUT` − 300). |
+| `BASH_TIMEOUT` | `600`, capped at `BASH_TIMEOUT_MAX` | Seconds a Bash tool call may run when the agent passes no timeout (`BASH_DEFAULT_TIMEOUT_MS` to Claude Code, whose own default is 120). Must be a positive integer not above `BASH_TIMEOUT_MAX`. |
+| `BASH_TIMEOUT_MAX` | `STALL_TIMEOUT` − 300, never below `120` | The longest timeout an agent may ask for (`BASH_MAX_TIMEOUT_MS`); the prompts state it in minutes. Must be a positive integer below `STALL_TIMEOUT`, or the watchdog would kill a legitimately long command. |
+| `BACKGROUND_TASKS` | `0` | `0` disables Claude Code's background tasks (`run_in_background` and the automatic move of a slow command to the background), which end a headless run with "verification still running". `1` leaves Claude Code's own behaviour. See [What happens in a phase](#what-happens-in-a-phase). |
 | `GATE_TIMEOUT` | `3600` | Kill the gate command after this long (it is not an agent, the stall watchdog does not cover it). The gate runs with stdin closed, so anything that prompts fails fast. |
 | `PUSH`, `GIT_REMOTE`, `GIT_BRANCH` | `1`, `origin`, current | Push after every verified phase. |
 | `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | `Phase Runner` / `runner@phase.local` | Identity for runner commits. |
@@ -462,6 +484,7 @@ the auth and re-run — the backlog is pushed first. `PUSH=0` disables pushing.
 | Builder reported blocked | Read `state/reviews/<phase>.blocked.md`; it names what it needs. Provide it (credentials, a decision, a package), re-run. |
 | `push failed 3 times` | No SSH agent forwarded / bad token in the remote URL. Fix, re-run — the backlog pushes first. |
 | Killed as stalled during a long docker build / test suite | Raise `STALL_TIMEOUT`. The retry resumes the same session, so little is lost. |
+| Builder reports "verification still running", "cut off" or "the turn was force-ended" | A Bash call outran its timeout and went to the background, where nothing wakes the agent up. With the defaults (`BACKGROUND_TASKS=0`, `BASH_TIMEOUT=600`, maximum `STALL_TIMEOUT` − 300) this cannot happen; if the project sets its own values, check the banner line `Bash tool: …`, raise `BASH_TIMEOUT_MAX` (and `STALL_TIMEOUT` with it) above the slowest command, and keep `BACKGROUND_TASKS=0`. |
 | Agent can't reach its own services on `127.0.0.1` | DooD: use `host.docker.internal:PORT`, or attach test containers to the app's compose network. |
 | `Cannot connect to the Docker daemon` in the transcript, or the builder reports blocked asking for `DOCKER_SOCKET=1` | The project runs with `DOCKER_SOCKET=0` (the template default). If its phases or gate really need containers, set `DOCKER_SOCKET=1` in `runner.env` and re-run. |
 | `refusing to start a container with the kit as the project` | The project directory is the kit itself, whose code is mounted live into the run. Run a frozen clone's `bin/phase-runner` with `--project` pointing here, see [Building the kit with the kit](#building-the-kit-with-the-kit). |
@@ -488,7 +511,11 @@ skipped), per-phase manifest options, per-role model/effort, subagent model
 and output cap, `FIX_CONTEXT=resume` with fallback, dry run, two phases,
 committed verdicts, reviewer leaving files, uncommitted leftovers, preflight,
 final review, the host CLI, the `DOCKER_SOCKET` switch (with a fake `docker`),
-the CLI refusing to build the kit itself — plus every guard rule. The suite
+the CLI refusing to build the kit itself, the Bash tool settings (defaults
+and explicit values as every role's process receives them, derived defaults
+from a small `STALL_TIMEOUT`, invalid values stopping the run before any
+agent, the banner line and the minutes stated in the prompts) — plus every
+guard rule. The suite
 ignores the caller's environment: it re-executes itself once under `env -i`
 with only `PATH`, `HOME` and `TMPDIR`, so exported runner settings (inside a
 runner container, or on your machine) cannot change what a scenario asserts;
