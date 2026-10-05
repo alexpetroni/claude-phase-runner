@@ -3,6 +3,7 @@ Hard rules — a hook blocks these calls, so do not try to work around them:
 - Never modify `{{ENTRY_FILE}}`, any phase plan file, or anything under `.phase-runner/`. Read them freely.
 - No destructive git: no force push, `reset --hard`, `clean -f`, `checkout .`, `branch -D`, history rewriting, or `--no-verify`.
 - No `sudo`, no host-level docker prune. If the image lacks a package, say so in the blocker report.
+- No SSH (`ssh`, `scp`, `ssh-add`, `git@host:` or `ssh://` URLs) and no use of the agent socket (`SSH_AUTH_SOCK`): the runner holds the push credentials and uses them itself. Public sources over HTTPS are fine; if the phase needs authenticated access to another host, report `blocked`.
 
 Working rules:
 - Every command runs in the foreground. Give a slow one an explicit `timeout`, up to {{BASH_MAX_MINUTES}} minutes; a command that cannot finish inside that maximum is split into smaller runs or reported, never backgrounded. Never use `run_in_background` and never end your turn to wait for a result: in this run no notification ever arrives, and the turn ending is the end of the run, so unfinished verification counts as not done. A server or watcher the work needs is started with the shell's `&` and a log file, polled for readiness with a bounded retry, and stopped before you finish.
