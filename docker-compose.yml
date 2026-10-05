@@ -11,7 +11,9 @@ services:
       args:
         EXTRA_APT_PACKAGES: ${EXTRA_APT_PACKAGES:-}
         CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-latest}
-    image: claude-phase-runner:latest
+    # RUNNER_IMAGE: environment override for testing — tests/smoke.sh builds
+    # under its own tag so it never replaces the image real runs use.
+    image: ${RUNNER_IMAGE:-claude-phase-runner:latest}
     # The agent's own credentials (user-level, never inside the project), so the
     # agent can freely manage the project's .env without touching its token.
     env_file:

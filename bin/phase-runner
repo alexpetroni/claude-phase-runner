@@ -209,7 +209,9 @@ cmd_run() {  # cmd_run MODE
   info "State:     $(rel "$STATE") · agent home: $(rel "$AGENT_HOME")"
 
   local compose=(docker compose -f "$KIT_DIR/docker-compose.yml")
-  if docker image inspect claude-phase-runner:latest >/dev/null 2>&1; then
+  # The same name docker-compose.yml interpolates; RUNNER_IMAGE is an
+  # environment override for testing (the smoke test builds under its own tag).
+  if docker image inspect "${RUNNER_IMAGE:-claude-phase-runner:latest}" >/dev/null 2>&1; then
     "${compose[@]}" build --quiet runner || die "image build failed"
   else
     info "Building the runner image (first run; takes a few minutes)"

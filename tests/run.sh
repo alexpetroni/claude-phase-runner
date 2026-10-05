@@ -752,6 +752,7 @@ cli_run() {  # cli_run [RUNNER_ENV_LINE...] → RC, OUT, FAKE_DOCKER (calls, soc
 }
 cli_run
 assert_eq "$RC" 0 "rc (unset)"
+assert_grep '^image inspect claude-phase-runner:latest$' "$FAKE_DOCKER/calls"
 assert_eq "$(cat "$FAKE_DOCKER/sock" 2>/dev/null)" /var/run/docker.sock "unset keeps the socket (projects that predate the setting)"
 assert_eq "$(cat "$FAKE_DOCKER/setting" 2>/dev/null)" 1 "the container is told (unset)"
 assert_grep 'Docker: +host socket mounted' "$OUT"
@@ -771,6 +772,14 @@ assert_no_file "$FAKE_DOCKER/calls"
 assert_grep '^ +- \$\{HOST_DOCKER_SOCK:-/dev/null\}:/var/run/docker\.sock$' "$KIT/docker-compose.yml"
 assert_not_grep '^ +- /var/run/docker\.sock:' "$KIT/docker-compose.yml"
 assert_grep '^DOCKER_SOCKET=0$' "$KIT/templates/runner.env"
+# RUNNER_IMAGE: an environment override for testing (tests/smoke.sh builds
+# under its own tag). The CLI inspects that name, and compose interpolates
+# the same one, so the default image is never replaced.
+RUNNER_IMAGE=x:y cli_run DOCKER_SOCKET=0
+assert_eq "$RC" 0 "rc (RUNNER_IMAGE)"
+assert_grep '^image inspect x:y$' "$FAKE_DOCKER/calls"
+assert_not_grep 'claude-phase-runner:latest' "$FAKE_DOCKER/calls"
+assert_grep '^ +image: \$\{RUNNER_IMAGE:-claude-phase-runner:latest\}$' "$KIT/docker-compose.yml"
 
 scenario "host CLI: the kit refuses to build itself; init/status/logs/reset still work there (fake docker)"
 # A copy of the kit that is also the project: its own bin/phase-runner is run
