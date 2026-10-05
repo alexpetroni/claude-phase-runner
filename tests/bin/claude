@@ -40,6 +40,14 @@ say()  { emit "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tex
 result() { emit "{\"type\":\"result\",\"subtype\":\"success\",\"duration_ms\":60000,\"total_cost_usd\":$([[ $resumed == 1 ]] && echo 0.8 || echo 0.5),\"num_turns\":3,\"session_id\":\"$sid\",\"structured_output\":$1}"; }
 # A failed call: the CLI's error text lands in the result event, cost so far attached.
 fail_result() { emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"duration_ms\":1000,\"total_cost_usd\":0.3,\"num_turns\":2,\"session_id\":\"$sid\",\"result\":$(jq -Rn --arg t "$1" '$t')}"; }
+# The CLI's rate_limit_event in its real shape. Only rate_limit_info.status
+# says whether the request was rejected: the overage fields describe the
+# account and read "rejected"/"out_of_credits" on allowed events too.
+rate_limit_event() {  # rate_limit_event allowed|rejected TYPE RESETS_AT
+  local five=0.55 over=0.88 at5=$(( $3 + 3600 )) at7=$(( $3 + 86400 ))
+  case "$2" in five_hour) five=1; at5=$3 ;; seven_day_overage_included) over=1; at7=$3 ;; esac
+  emit "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"$1\",\"resetsAt\":$3,\"rateLimitType\":\"$2\",\"overageStatus\":\"rejected\",\"overageDisabledReason\":\"out_of_credits\",\"isUsingOverage\":false,\"unifiedWindows\":{\"five_hour\":{\"utilization\":$five,\"resetsAt\":$at5},\"seven_day\":{\"utilization\":0.51,\"resetsAt\":$at7},\"seven_day_overage_included\":{\"utilization\":$over,\"resetsAt\":$at7}}}}"
+}
 emit "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$sid\",\"model\":\"fake\",\"claude_code_version\":\"0.0.0\",\"mcp_servers\":[]}"
 
 # The phase file named in the prompt (first `….md` in backticks) names the work file.
@@ -80,15 +88,32 @@ case "$role:$outcome" in
     echo 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
     fail_result 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
     exit 1 ;;
+  # Usage limits, each with the result text the real CLI paired it with. The
+  # five-hour windows reset three seconds ahead (one second raced the driver's
+  # clock); the weekly one FAKE_LIMIT_RESET_IN seconds ahead, a day by default.
   build:limit|review:limit)
     say "starting"
-    emit "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"resetsAt\":$(( $(date +%s) + 1 )),\"rateLimitType\":\"five_hour\"}}"
-    fail_result "You've hit your session limit · resets 3:20pm (UTC)"
+    rate_limit_event rejected five_hour $(( $(date +%s) + 3 ))
+    fail_result "You've hit your session limit · resets 4:10pm (UTC)"
     exit 1 ;;
-  build:nocredits)
+  build:limitcredits)
     say "starting"
-    emit "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"resetsAt\":$(( $(date +%s) + 1 )),\"rateLimitType\":\"five_hour\",\"overageDisabledReason\":\"out_of_credits\"}}"
+    rate_limit_event rejected five_hour $(( $(date +%s) + 3 ))
+    fail_result "You're out of usage credits · resets 8:40pm (UTC)"
+    exit 1 ;;
+  build:weekly)
+    say "starting"
+    rate_limit_event rejected seven_day_overage_included $(( $(date +%s) + ${FAKE_LIMIT_RESET_IN:-86400} ))
     fail_result "You're out of usage credits. Switch to another model to continue."
+    exit 1 ;;
+  build:nocredits)   # out of credit with no rejected event: nothing to wait for
+    say "starting"
+    fail_result "You're out of usage credits. /model to switch models."
+    exit 1 ;;
+  build:allowed)     # a healthy run's event, then a plain 529: not a rejection
+    say "starting"
+    rate_limit_event allowed five_hour $(( $(date +%s) + 7200 ))
+    fail_result 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
     exit 1 ;;
   build:stall|review:stall)
     say "thinking"
