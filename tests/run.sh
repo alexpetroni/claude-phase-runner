@@ -702,8 +702,22 @@ assert_eq "$rc" 0 "logs rc"
 grep -q 'Working on A' <<<"$lg" && ok || bad "logs render"
 lg="$(bash "$KIT/bin/phase-runner" --project "$FIXPASS_PROJECT" logs A.md.gate 2>&1)"; rc=$?
 assert_eq "$rc" 0 "gate log rc"
+# driver.log is the newest file in logs/ during a run: `logs` with no phase still picks an agent log
+touch "$FIXPASS_PROJECT/.phase-runner/state/logs/driver.log"
+lg="$(bash "$KIT/bin/phase-runner" --project "$FIXPASS_PROJECT" logs 2>&1)"; rc=$?
+assert_eq "$rc" 0 "latest log rc"
+grep -q 'driver.log' <<<"$lg" && bad "latest log picked driver.log" || ok
+grep -qE '^.*▶ .*state/logs/A\.md\.[a-z]+(\.r[0-9]+)?\.log' <<<"$lg" && ok || bad "latest log is not an agent log: $(head -1 <<<"$lg")"
+lg="$(bash "$KIT/bin/phase-runner" --project "$FIXPASS_PROJECT" logs driver 2>&1)"; rc=$?
+assert_eq "$rc" 0 "driver log rc"
+grep -qE "$TS INFO === driver start: mode build" <<<"$lg" && ok || bad "logs driver does not print the driver log"
+grep -qE "$TS INFO All phases complete$" <<<"$lg" && ok || bad "logs driver is not plain text"
+grep -q 'logs driver' <<<"$(tail -1 <<<"$st")" && ok || bad "status does not name the driver log in its last line: $(tail -1 <<<"$st")"
+grep -q 'logs driver' <<<"$(bash "$KIT/bin/phase-runner" --help)" && ok || bad "usage does not list 'logs driver'"
+assert_file "$FIXPASS_PROJECT/.phase-runner/state/logs/driver.log"
 out="$(bash "$KIT/bin/phase-runner" --project "$FIXPASS_PROJECT" reset --yes 2>&1)"; rc=$?
 assert_eq "$rc" 0 "reset rc"
+assert_no_file "$FIXPASS_PROJECT/.phase-runner/state/logs/driver.log"
 assert_no_file "$FIXPASS_PROJECT/.phase-runner/state"
 assert_file "$FIXPASS_PROJECT/.phase-runner/runner.env"
 out="$(bash "$KIT/bin/phase-runner" --project "$p" bogus 2>&1)"; rc=$?

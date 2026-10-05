@@ -24,6 +24,7 @@ Usage: phase-runner [--project DIR] <command> [options]
   review               read-only adversarial review of the finished project → .phase-runner/state/REVIEW.md
   status               phases with status, verdict, fix rounds, cost, minutes
   logs [PHASE] [-f]    readable agent transcript (latest log by default; -f follows a live run)
+  logs driver [-f]     the runner's own log: starts, retries, waits, verdicts, stops, across runs
   reset [--yes]        delete .phase-runner/state (config and agent home are kept)
 
 The project is the git repository containing the current directory unless
@@ -260,22 +261,29 @@ cmd_status() {
     awk -F'\t' '{ print "  " $1 " — " $2 }' "$blocked_f"
   fi
   [[ -f "$STATE/SUMMARY.md" ]] && { echo; echo "Last run: $(head -1 "$STATE/SUMMARY.md" | sed 's/^# //')"; }
-  echo "Verdicts: $(rel "$STATE")/reviews/ · logs: phase-runner logs [PHASE] [-f]"
+  echo "Verdicts: $(rel "$STATE")/reviews/ · logs: phase-runner logs [PHASE] [-f] · the runner's own log: phase-runner logs driver"
 }
 
 cmd_logs() {
   resolve_project
-  local follow=0 pick="" a f
+  local follow=0 pick="" a f="" cand
   for a in "${ARGS[@]}"; do
     case "$a" in -f|--follow) follow=1 ;; *) pick="$a" ;; esac
   done
   [[ -d "$STATE/logs" ]] || die "no logs yet in $(rel "$STATE")/logs"
-  if [[ -n "$pick" ]]; then f="$(ls -t "$STATE/logs"/*"$pick"*.log 2>/dev/null | head -1)"
-  else f="$(ls -t "$STATE/logs"/*.log 2>/dev/null | head -1)"; fi
+  # driver.log is the runner's own account and, during a run, always the newest
+  # file: it is shown only when asked for by name, never as "the latest log".
+  if [[ "$pick" == driver ]]; then
+    f="$STATE/logs/driver.log"; [[ -f "$f" ]] || f=""
+  else
+    while IFS= read -r cand; do
+      [[ "$cand" == */driver.log ]] || { f="$cand"; break; }
+    done < <(ls -t "$STATE/logs"/*"$pick"*.log 2>/dev/null)
+  fi
   [[ -n "$f" ]] || die "no log matching '$pick' in $(rel "$STATE")/logs"
   info "$(rel "$f")"
   local raw=0
-  [[ "$f" == *.gate.* || "$f" == */push.log ]] && raw=1
+  [[ "$f" == *.gate.* || "$f" == */push.log || "$f" == */driver.log ]] && raw=1
   command -v jq >/dev/null || { warn "jq not installed — showing raw stream-json"; raw=1; }
   if (( raw )); then
     if (( follow )); then tail -n +1 -F "$f"; else cat "$f"; fi
