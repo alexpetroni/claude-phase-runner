@@ -217,7 +217,8 @@ run_gate() {
   GATE_LOG="$LOGS/$2.gate.r$3.log"
   local t0 rc; t0=$(date +%s)
   log "Gate (round $3): $GATE_CMD"
-  timeout --kill-after=30 "$GATE_TIMEOUT" bash -c "$GATE_CMD" >"$GATE_LOG" 2>&1 </dev/null; rc=$?
+  # The gate executes code the builder just wrote: like the agents, it runs without the SSH agent.
+  timeout --kill-after=30 "$GATE_TIMEOUT" env -u SSH_AUTH_SOCK bash -c "$GATE_CMD" >"$GATE_LOG" 2>&1 </dev/null; rc=$?
   if (( rc == 0 )); then
     record_run "$1" gate "$3" green "" "" $(( $(date +%s) - t0 ))
     log "Gate GREEN"

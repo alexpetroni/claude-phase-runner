@@ -150,7 +150,9 @@ run_claude() {
   [[ -n "$SUBAGENT_MODEL" ]] && env+=(CLAUDE_CODE_SUBAGENT_MODEL="$SUBAGENT_MODEL")
   env+=(BASH_DEFAULT_TIMEOUT_MS=$(( BASH_TIMEOUT * 1000 )) BASH_MAX_TIMEOUT_MS=$(( BASH_TIMEOUT_MAX * 1000 )))
   [[ "$BACKGROUND_TASKS" == "0" ]] && env+=(CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1)
-  env "${env[@]}" claude "${args[@]}" -p "$prompt" >>"$logfile" 2>&1 &
+  # The forwarded SSH agent is the runner's push credential: only the driver's
+  # own git calls get it, never an agent (of any role) and what it spawns.
+  env -u SSH_AUTH_SOCK "${env[@]}" claude "${args[@]}" -p "$prompt" >>"$logfile" 2>&1 &
   pid=$!
 
   (

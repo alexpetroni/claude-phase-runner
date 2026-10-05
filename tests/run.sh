@@ -52,7 +52,7 @@ run_driver() {
   ( cd "$proj" && \
     PATH="$KIT/tests/bin:$PATH" FAKE_PLAN="$plan" FAKE_LOG="$FAKE" \
     PHASE_RUNNER_HOME="$KIT" PROJECT_DIR="$proj" ENTRY_FILE=plan/ENTRY.md \
-    PHASE_FILES="${PHASE_FILES:-plan/A.md}" PUSH=0 RETRY_SCHEDULE="${RETRY_SCHEDULE:-0}" \
+    PHASE_FILES="${PHASE_FILES:-plan/A.md}" PUSH="${PUSH:-0}" RETRY_SCHEDULE="${RETRY_SCHEDULE:-0}" \
     STALL_TIMEOUT="${STALL_TIMEOUT:-600}" STALL_POLL="${STALL_POLL:-1}" GATE_CMD="${GATE_CMD-true}" \
     GUARD=0 RUNNER_MODE="${RUNNER_MODE:-build}" PHASE_REVIEW="${PHASE_REVIEW:-1}" \
     MAX_FIX_ROUNDS="${MAX_FIX_ROUNDS:-2}" COMMIT_REVIEWS="${COMMIT_REVIEWS:-0}" \
@@ -832,6 +832,42 @@ assert_grep 'costs \$5 & more' "$OUT"
 
 # ── Guard hook ───────────────────────────────────────────────────────────────
 scenario "guard hook"
+# ── The SSH agent is the runner's push credential, never the agent's ─────────
+scenario "SSH agent: every agent and the gate run without SSH_AUTH_SOCK; the runner's push keeps it"
+p="$(new_project sshagent)"
+remote="$TMP/remote-sshagent.git"; git init -q --bare "$remote"
+git -C "$p" remote add origin "$remote"
+printf '#!/usr/bin/env bash\necho "${SSH_AUTH_SOCK-unset}" > "%s/pre-push.saw"\n' "$TMP" > "$p/.git/hooks/pre-push"
+chmod +x "$p/.git/hooks/pre-push"
+SSH_AUTH_SOCK=/tmp/fake-agent.sock PUSH=1 GATE_CMD='test -z "${SSH_AUTH_SOCK:-}"' \
+  run_driver "$p" build:ok review:FAIL fix:ok review:PASS
+assert_eq "$RC" 0 "rc"
+assert_eq "$(invocations)" 4 "invocations"
+for n in 1 2 3 4; do                       # build, review, fix, review
+  assert_file "$FAKE/$n.env"
+  assert_not_grep 'SSH_AUTH_SOCK' "$FAKE/$n.env"
+done
+assert_grep 'Gate GREEN' "$OUT"
+assert_grep $'\tgate\t1\tgreen\t' "$STATE/runs.tsv"
+assert_eq "$(cat "$TMP/pre-push.saw")" /tmp/fake-agent.sock "pre-push hook saw the driver's SSH_AUTH_SOCK"
+assert_grep 'Pushed main to origin' "$OUT"
+assert_eq "$(git -C "$remote" rev-parse main)" "$(git -C "$p" rev-parse HEAD)" "remote has HEAD"
+assert_grep 'No SSH .* the runner holds the push credentials' "$FAKE/1.prompt"
+assert_grep 'No SSH .* the runner holds the push credentials' "$FAKE/3.prompt"
+unset n remote
+
+scenario "SSH agent: preflight and final review run without SSH_AUTH_SOCK; preflight is told not to probe"
+p="$(new_project sshreport)"
+SSH_AUTH_SOCK=/tmp/fake-agent.sock RUNNER_MODE=preflight run_driver "$p" preflight:ok
+assert_eq "$RC" 0 "rc (preflight)"
+assert_file "$FAKE/1.env"
+assert_not_grep 'SSH_AUTH_SOCK' "$FAKE/1.env"
+assert_grep 'Push access is checked by the runner itself' "$FAKE/1.prompt"
+SSH_AUTH_SOCK=/tmp/fake-agent.sock RUNNER_MODE=review run_driver "$p" final-review:ok
+assert_eq "$RC" 0 "rc (review)"
+assert_file "$FAKE/1.env"
+assert_not_grep 'SSH_AUTH_SOCK' "$FAKE/1.env"
+
 # shellcheck source=guard.sh
 source "$KIT/tests/guard.sh"
 
