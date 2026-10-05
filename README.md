@@ -353,7 +353,15 @@ Every role: no `git push` (the runner pushes), no `reset --hard`, `clean -f`,
 no `sudo`, no `rm -rf` of root/home/`.git`, no `docker … prune` (the socket is
 the host's), no `curl | sh`, and **no modification of the entry file, the
 phase files or `.phase-runner/`** — through file tools or shell redirects.
-Reading them is fine.
+Reading them is fine. **No SSH**, because the forwarded agent is the runner's
+push credential: no `ssh`, `scp`, `sftp`, `ssh-add` or `ssh-agent` at a
+command position (also after `timeout N`, `env VAR=…`, `&&`, `;`, `|` or
+inside `$( )`), no command that mentions `SSH_AUTH_SOCK` or `/ssh-agent`, and
+no git command with its own SSH transport (a `git@host:` or `ssh://` URL,
+`core.sshCommand`, `GIT_SSH`, `GIT_SSH_COMMAND`). Public sources over HTTPS
+(`git clone https://…`, `git ls-remote https://…`), `git fetch` on the
+existing remote, and reading or grepping files that contain the word stay
+allowed.
 
 Read-only roles (reviewer, preflight, final review): additionally no edit
 tools at all, no git mutation of any kind, no publishing. After a read-only
@@ -472,8 +480,21 @@ work is never only local). The agent itself cannot push — the guard blocks it.
 - **HTTPS remote with embedded token**
   (`https://x-access-token:<TOKEN>@github.com/you/repo.git`): needs nothing.
 
+Only the runner's own git calls see the forwarded agent: every agent process
+and the gate command run without `SSH_AUTH_SOCK`, and the guard blocks the
+SSH client family and git-over-SSH for every role (see the security model).
+
+With `PUSH=1`, `build` and `preflight` check push access before the first
+agent is launched: one read-only `git ls-remote` against the push remote,
+capped at 30 seconds. Success is one log line (`Push remote origin (…) is
+reachable`); failure is a warning naming the remote and the two usual causes
+(no SSH agent forwarded, a bad token in an HTTPS URL), and the run continues,
+because the work is committed locally either way. The output of that contact
+is appended to `logs/push.log`.
+
 Push failures retry 3× and then abort without losing the phase record; fix
-the auth and re-run — the backlog is pushed first. `PUSH=0` disables pushing.
+the auth and re-run — the backlog is pushed first. `PUSH=0` disables pushing
+(and the early check).
 
 ## Security model — read this once
 
@@ -489,10 +510,20 @@ the auth and re-run — the backlog is pushed first. `PUSH=0` disables pushing.
   That is the price of docker-first verification (a compose stack, a database
   or test containers). With `DOCKER_SOCKET=0` nothing is mounted (`/dev/null`
   sits at the socket path) and the agent is left with the project directory,
-  its own home, the network and, when one is forwarded, the use of your SSH
-  agent. Projects created by `init` start at `0`; a `runner.env` without the setting keeps `1`, so existing projects
+  its own home and the network. Projects created by `init` start at `0`; a `runner.env` without the setting keeps `1`, so existing projects
   behave as before until you add the line. Set `0` wherever the phases and the
   gate need no containers.
+- **The forwarded SSH agent is the runner's, not the agent's.** When an SSH
+  agent is forwarded for pushing it would open every host your loaded keys
+  open, for as long as the run lasts. So the accidental path is closed: the
+  `claude` process of every role and the gate command run without
+  `SSH_AUTH_SOCK`, and the guard blocks `ssh`/`scp`/`sftp`/`ssh-add`/`ssh-agent`,
+  any mention of `SSH_AUTH_SOCK` or `/ssh-agent`, and git over SSH. What
+  remains, honestly: the driver and the agent run as the same user, so the
+  socket file at `/ssh-agent` stays reachable by an agent that deliberately
+  points `SSH_AUTH_SOCK` at it — the guard turns that into a blocked call and
+  a visible transcript line, not into an impossibility. The hard fix is
+  running the driver and the agent as different users, which is not done.
 - Nothing is published inbound.
 - Claude Code refuses to skip permissions as root, so `bootstrap.sh` starts as
   root only to align the docker-socket group (when the socket is mounted) and
@@ -510,7 +541,7 @@ the auth and re-run — the backlog is pushed first. `PUSH=0` disables pushing.
 | `no config at .phase-runner/runner.env` | Run `phase-runner init` in the project, or pass `--project DIR`. |
 | Phase BLOCKED after fix rounds | Read `state/reviews/<phase>.md`. Fix the plan or the code yourself, or raise `MAX_FIX_ROUNDS`, then re-run: the phase restarts from its prompt on the committed state. |
 | Builder reported blocked | Read `state/reviews/<phase>.blocked.md`; it names what it needs. Provide it (credentials, a decision, a package), re-run. |
-| `push failed 3 times` | No SSH agent forwarded / bad token in the remote URL. Fix, re-run — the backlog pushes first. |
+| `push failed 3 times` | No SSH agent forwarded / bad token in the remote URL. Fix, re-run — the backlog pushes first. With `PUSH=1` the driver checks the remote before the first agent (`Push remote … is NOT reachable` warning in the first minute, details in `logs/push.log`), so this is usually visible at the start of the run. |
 | Killed as stalled during a long docker build / test suite | Raise `STALL_TIMEOUT`. The retry resumes the same session, so little is lost. |
 | Builder reports "verification still running", "cut off" or "the turn was force-ended" | A Bash call outran its timeout and went to the background, where nothing wakes the agent up. With the defaults (`BACKGROUND_TASKS=0`, `BASH_TIMEOUT=600`, maximum `STALL_TIMEOUT` − 300) this cannot happen; if the project sets its own values, check the banner line `Bash tool: …` (on the terminal or in `phase-runner logs driver`), raise `BASH_TIMEOUT_MAX` (and `STALL_TIMEOUT` with it) above the slowest command, and keep `BACKGROUND_TASKS=0`. |
 | Agent can't reach its own services on `127.0.0.1` | DooD: use `host.docker.internal:PORT`, or attach test containers to the app's compose network. |
@@ -551,7 +582,11 @@ agent, the banner line and the minutes stated in the prompts), the driver log
 (every terminal line of a run mirrored in order with timestamp and level, the
 `INFO`/`WARN`/`FAIL` lines of a retry, a red gate and a `die`, two runs
 appending under two headers, an unwritable file not failing the build, and
-`logs`, `logs driver` and `status` on the host) — plus every
+`logs`, `logs driver` and `status` on the host), the SSH agent (every role's
+process and the gate without `SSH_AUTH_SOCK` while a `pre-push` hook sees the
+driver's value and the push to a bare remote succeeds; the early push-access
+check: one line for a reachable remote, a warning naming an unreachable one
+in `preflight` with no push attempted, nothing contacted with `PUSH=0`) — plus every
 guard rule. The suite
 ignores the caller's environment: it re-executes itself once under `env -i`
 with only `PATH`, `HOME` and `TMPDIR`, so exported runner settings (inside a
