@@ -491,7 +491,11 @@ capped at 30 seconds. Success is one log line (`Push remote origin (…) is
 reachable`); failure is a warning naming the remote and the two usual causes
 (no SSH agent forwarded, a bad token in an HTTPS URL), and the run continues,
 because the work is committed locally either way. The output of that contact
-is appended to `logs/push.log`.
+is appended to `logs/push.log`. The contact runs with git's terminal prompts
+disabled and stdin closed (like the gate): a remote without usable credentials
+fails at once with git's own error (`could not read Username for …: terminal
+prompts disabled`) instead of sitting on a `Username for …` prompt until the
+cap kills it.
 
 Push failures retry 3× and then abort without losing the phase record; fix
 the auth and re-run — the backlog is pushed first. `PUSH=0` disables pushing
@@ -588,7 +592,10 @@ appending under two headers, an unwritable file not failing the build, and
 process and the gate without `SSH_AUTH_SOCK` while a `pre-push` hook sees the
 driver's value and the push to a bare remote succeeds; the early push-access
 check: one line for a reachable remote, a warning naming an unreachable one
-in `preflight` with no push attempted, nothing contacted with `PUSH=0`) — plus every
+in `preflight` with no push attempted, a remote that needs credentials —
+`tests/bin/git-remote-needsauth`, a helper that asks git for credentials like
+`git-remote-https` on a 401 — failing at once with git's `terminal prompts
+disabled` error in `logs/push.log`, nothing contacted with `PUSH=0`) — plus every
 guard rule and the lint scenario below. The suite
 ignores the caller's environment: it re-executes itself once under `env -i`
 with only `PATH`, `HOME` and `TMPDIR`, so exported runner settings (inside a

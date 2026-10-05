@@ -927,6 +927,24 @@ assert_not_grep 'Pushed|Push failed' "$OUT"
 assert_not_grep $'\tpush\t' "$STATE/runs.tsv"
 assert_grep 'does not appear to be a git repository' "$STATE/logs/push.log"
 
+scenario "push access: a remote that needs credentials fails at once with git's own error, no prompt, no kill"
+# tests/bin/git-remote-needsauth asks git for credentials like git-remote-https
+# on a 401. The driver has a terminal under `docker compose run`, so without
+# GIT_TERMINAL_PROMPT=0 git would prompt for a username until the 30-second cap
+# kills it; with it the log holds git's error and the warning is immediate.
+p="$(new_project pushauth)"
+git -C "$p" remote add origin needsauth://needsauth.invalid/o/r.git
+t0=$(date +%s)
+PUSH=1 RUNNER_MODE=preflight run_driver "$p" preflight:ok
+assert_eq "$RC" 0 "rc"
+(( $(date +%s) - t0 < 20 )) && ok || bad "the push check waited on a prompt instead of failing at once"
+assert_grep 'Push remote origin \(needsauth://needsauth.invalid/o/r.git\) is NOT reachable' "$OUT"
+assert_grep "could not read Username for 'https://needsauth.invalid': terminal prompts disabled" "$STATE/logs/push.log"
+assert_not_grep 'No such device|Killed' "$STATE/logs/push.log"
+assert_grep 'MARKER-REPORT' "$STATE/TOOLING.md"
+assert_not_grep $'\tpush\t' "$STATE/runs.tsv"
+unset t0
+
 scenario "push access: PUSH=0 never contacts the remote"
 p="$(new_project pushcheck0)"
 git -C "$p" remote add origin "$TMP/no-such-remote.git"

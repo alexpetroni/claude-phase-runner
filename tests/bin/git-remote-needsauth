@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Fake git remote helper for the push-access tests: a remote that needs
+# credentials the runner does not have, without any network. `git ls-remote
+# needsauth://host/repo` spawns this with (name, url) and speaks the
+# remote-helper protocol on stdin; on `list` it asks git for credentials the
+# way git-remote-https does on a 401, so the outcome is git's own prompt
+# handling: a block on the terminal when prompts are allowed, `could not read
+# Username … terminal prompts disabled` at once when they are not.
+# `credential.helper` and `core.askPass` are cleared so a developer's own
+# git config cannot answer in git's place.
+set -uo pipefail
+url="https://${2#needsauth://}"
+while read -r cmd; do
+  case "$cmd" in
+    capabilities) printf 'fetch\n\n' ;;
+    list) git -c credential.helper= -c core.askPass= credential fill <<<"url=$url" >/dev/null || exit 1
+          printf '0000000000000000000000000000000000000000 refs/heads/main\n\n' ;;
+    '') exit 0 ;;
+  esac
+done

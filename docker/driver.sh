@@ -391,7 +391,11 @@ check_push_access() {
   case "$MODE" in build|preflight) ;; *) return 0 ;; esac
   local url
   url="$(git remote get-url "$GIT_REMOTE" 2>/dev/null || echo "?")"
-  if timeout --kill-after=10 30 git ls-remote "$GIT_REMOTE" HEAD >>"$LOGS/push.log" 2>&1; then
+  # Under `docker compose run` the driver has a terminal, and a remote without
+  # usable credentials would sit on git's `Username for …` prompt until the
+  # cap kills it: prompts off and stdin closed (as for the gate), so git fails
+  # at once and push.log holds its own error.
+  if GIT_TERMINAL_PROMPT=0 timeout --kill-after=10 30 git ls-remote "$GIT_REMOTE" HEAD >>"$LOGS/push.log" 2>&1 </dev/null; then
     log "Push remote $GIT_REMOTE ($url) is reachable"
   else
     warn "Push remote $GIT_REMOTE ($url) is NOT reachable (logs/push.log) — pushing will fail. Usual causes: no SSH agent forwarded (eval \$(ssh-agent); ssh-add on the host) or a bad token in an HTTPS remote URL. The run continues: work is committed locally and the next run pushes the backlog."
