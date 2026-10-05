@@ -51,6 +51,7 @@ services:
       STALL_TIMEOUT: ${STALL_TIMEOUT:-1800}
       GATE_TIMEOUT: ${GATE_TIMEOUT:-3600}
       LIMIT_WAIT_MAX: ${LIMIT_WAIT_MAX:-21600}
+      LIMIT_WAIT_GRACE: ${LIMIT_WAIT_GRACE:-60}
       GUARD: ${GUARD:-1}
       # the agent's Bash tool: foreground timeouts (seconds) and background tasks
       BASH_TIMEOUT: ${BASH_TIMEOUT:-}

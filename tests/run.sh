@@ -438,6 +438,12 @@ assert_eq "$RC" 0 "rc"
 assert_eq "$(invocations)" 3 "invocations"
 assert_grep 'Usage limit reached' "$OUT"
 assert_grep 'the five_hour window resets at [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} UTC — waiting' "$OUT"
+# With no grace the announced wait is the remaining distance to the reset, at
+# most the fake's 8-second offset (the LIMIT_WAIT_GRACE scenario exceeds it).
+announced_wait() { sed -nE 's/.*window resets at .* — waiting ([0-9]+)s, then resuming.*/\1/p' "$OUT" | head -1; }
+w="$(announced_wait)"
+[[ "$w" =~ ^[0-9]+$ ]] && (( w <= 8 )) && ok || bad "announced wait '$w' should be at most the 8-second offset with LIMIT_WAIT_GRACE=0"
+unset w
 assert_eq "$(arg_after 2 --resume)" "$(arg_after 1 --session-id)" "resume uses the first session id"
 assert_grep '^plan/A.md$' "$STATE/phases-done"
 assert_grep '"unifiedWindows"' "$STATE/logs/A.md.build.log"              # the fake speaks the real dialect
@@ -488,6 +494,26 @@ assert_grep 'Usage limit reached .*the seven_day_overage_included window resets 
 assert_not_grep 'out of usage credits — top up' "$OUT"
 assert_eq "$(arg_after 2 --resume)" "$(arg_after 1 --session-id)" "resume uses the first session id"
 assert_grep '^plan/A.md$' "$STATE/phases-done"
+
+scenario "LIMIT_WAIT_GRACE: a non-default grace lengthens the announced wait; invalid values stop the run before any agent"
+p="$(new_project grace)"
+# The remaining wait is at most the fake's 8-second offset, so an announced
+# wait above 8 can only be the grace; the driver really sleeps it.
+LIMIT_WAIT_GRACE=8 run_driver "$p" build:limit build:ok review:PASS
+assert_eq "$RC" 0 "rc"
+assert_eq "$(invocations)" 3 "invocations"
+w="$(announced_wait)"
+[[ "$w" =~ ^[0-9]+$ ]] && (( w > 8 && w <= 16 )) && ok || bad "announced wait '$w' should be the remaining wait (at most 8) plus the 8-second grace"
+assert_eq "$(arg_after 2 --resume)" "$(arg_after 1 --session-id)" "resume uses the first session id"
+assert_grep '^plan/A.md$' "$STATE/phases-done"
+for v in abc -1; do
+  p="$(new_project "grace$v")"
+  LIMIT_WAIT_GRACE=$v run_driver "$p" build:ok review:PASS
+  assert_eq "$RC" 1 "rc (LIMIT_WAIT_GRACE=$v)"
+  assert_eq "$(invocations)" 0 "invocations (LIMIT_WAIT_GRACE=$v)"
+  assert_grep "LIMIT_WAIT_GRACE=$v: must be a non-negative integer" "$OUT"
+done
+unset w v
 
 scenario "out of usage credits with no rejected event is an honest stop, not a retry"
 p="$(new_project nocredits)"

@@ -32,8 +32,11 @@ SUBAGENT_MODEL="${SUBAGENT_MODEL:-}"
 # to a file the agent can grep. Tool output is the single largest cache-write
 # cost, so keep this modest (Claude Code's default is 30000).
 BASH_OUTPUT_MAX_CHARS="${BASH_OUTPUT_MAX_CHARS:-}"
-# Longest wait for a subscription usage window to reset before giving up.
+# Longest wait for a subscription usage window to reset before giving up, and
+# the seconds added to every such wait: the reset time is the server's and
+# the clocks differ, so resuming on the dot can be rejected once more.
 LIMIT_WAIT_MAX="${LIMIT_WAIT_MAX:-21600}"
+LIMIT_WAIT_GRACE="${LIMIT_WAIT_GRACE:-60}"
 # The agent's Bash tool. A command that outruns its timeout is moved to the
 # background by Claude Code, and in a headless run the agent then ends its
 # turn waiting for a notification that never comes (README "What happens in a
@@ -293,7 +296,7 @@ run_agent() {
         wait=$(( LIMIT_RESET - $(date +%s) ))
         (( wait > LIMIT_WAIT_MAX )) && return "$rc"
         if (( wait > 0 )); then
-          delay=$(( wait + ${LIMIT_WAIT_GRACE:-60} ))
+          delay=$(( wait + LIMIT_WAIT_GRACE ))
           log "Usage limit reached ($role, attempt $attempt/$max_attempts): the $LIMIT_TYPE window resets at $(utc_time "$LIMIT_RESET") — waiting ${delay}s, then resuming"
         else
           log "Usage window reset already ($role, attempt $attempt/$max_attempts): the $LIMIT_TYPE window reset at $(utc_time "$LIMIT_RESET") — retrying in ${delay}s"

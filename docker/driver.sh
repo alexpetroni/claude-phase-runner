@@ -71,6 +71,7 @@ for p in "${PHASES[@]}"; do
   [[ -f "$p" ]] || die "phase file not found: $p (paths are relative to the project root)"
 done
 resolve_bash_settings   # validates explicit BASH_TIMEOUT / BASH_TIMEOUT_MAX / BACKGROUND_TASKS before any agent runs
+[[ "$LIMIT_WAIT_GRACE" =~ ^[0-9]+$ ]] || die "LIMIT_WAIT_GRACE=$LIMIT_WAIT_GRACE: must be a non-negative integer (seconds)"
 
 # Paths the agent may read but never modify (enforced by docker/guard.sh).
 # shellcheck disable=SC2034  # read by run_claude in lib/claude.sh, which hands it to the guard

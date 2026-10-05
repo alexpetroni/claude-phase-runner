@@ -278,6 +278,7 @@ All paths are relative to the project root. Phases are listed in
 | `BUILD_BUDGET_USD`, `REVIEW_BUDGET_USD` | none | Hard spend cap per agent run. |
 | `RETRY_SCHEDULE` | `30 300 3600 10800` | Seconds before each retry after a transient failure. The list's length is the retry count. |
 | `LIMIT_WAIT_MAX` | `21600` | Longest wait for a subscription usage window to reset. A rejected `rate_limit_event` whose reset is within this many seconds is waited out and the same session resumed; one further away stops the run at once, naming the reset time. |
+| `LIMIT_WAIT_GRACE` | `60` | Seconds added to every such wait before the session is resumed: the reset time is the server's and the clocks differ, so resuming on the dot can be rejected once more. A non-negative integer. |
 | `STALL_TIMEOUT` | `1800` | Kill + retry an agent that printed nothing for this long. Keep above your slowest silent step: a foreground Bash call prints nothing until it ends, so it also bounds `BASH_TIMEOUT_MAX` (the derived default is `STALL_TIMEOUT` − 300). |
 | `BASH_TIMEOUT` | `600`, capped at `BASH_TIMEOUT_MAX` | Seconds a Bash tool call may run when the agent passes no timeout (`BASH_DEFAULT_TIMEOUT_MS` to Claude Code, whose own default is 120). Must be a positive integer not above `BASH_TIMEOUT_MAX`. |
 | `BASH_TIMEOUT_MAX` | `STALL_TIMEOUT` − 300, never below `120` | The longest timeout an agent may ask for (`BASH_MAX_TIMEOUT_MS`); the prompts state it in minutes. Must be a positive integer below `STALL_TIMEOUT`, or the watchdog would kill a legitimately long command. |
@@ -387,8 +388,8 @@ Two failure shapes are treated as transient and retried on `RETRY_SCHEDULE`:
   wording for the same window varies ("You've hit your session limit · resets
   4:10pm", "You're out of usage credits · resets 8:40pm", "You're out of usage
   credits. Switch to another model to continue."), so the event decides, not
-  the text. A reset within `LIMIT_WAIT_MAX` is waited out (plus a short grace)
-  and the same session resumed; a reset further away stops the run at once —
+  the text. A reset within `LIMIT_WAIT_MAX` is waited out (plus
+  `LIMIT_WAIT_GRACE` seconds, 60 by default) and the same session resumed; a reset further away stops the run at once —
   no sleeping towards a certain rejection — with the window, the reset time as
   `YYYY-MM-DD HH:MM UTC`, the CLI's text and how to continue, in the output
   and in `SUMMARY.md`; a reset that has already passed is a plain retry.
@@ -580,7 +581,9 @@ five-hour wait under either wording with the real event shape, the weekly
 stop with its message in the output and `SUMMARY.md` and the same window
 waited out under a raised `LIMIT_WAIT_MAX` — the fake's windows reset 8
 seconds ahead, `FAKE_LIMIT_RESET_IN` from a scenario, so a driver delayed by a
-few seconds still finds the reset ahead —, the no-event out-of-credits stop,
+few seconds still finds the reset ahead —, a `LIMIT_WAIT_GRACE` above zero
+lengthening the announced wait and an invalid one stopping the run before
+any agent, the no-event out-of-credits stop,
 a reset already passed, a stale rejection seeded in the log by an earlier run,
 an allowed event), blocked builder, resume after an interruption (builder
 skipped), per-phase manifest options, per-role model/effort, subagent model
