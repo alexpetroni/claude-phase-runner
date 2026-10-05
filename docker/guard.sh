@@ -116,12 +116,16 @@ case "$tool" in
     # The forwarded SSH agent is the runner's push credential and opens every
     # host the human's keys open. The agent runs without it (SSH_AUTH_SOCK is
     # unset) and must not reach for it: no SSH client at a command position
-    # (also after timeout/env/assignments, a separator or inside $( )), no
-    # mention of the socket, no git command that brings its own SSH transport.
+    # (also after timeout/env/assignments, a separator or inside $( ); named
+    # by its path; as the command bash -c, sh -c or xargs run), no rsync over
+    # ssh, no mention of the socket, no git command that brings its own SSH
+    # transport. A path or a wrapper changes nothing about what runs.
     ssh_why="The runner holds the push credentials (the forwarded SSH agent); the agent runs without SSH. Use public sources over HTTPS (git clone https://…); if the phase needs authenticated access to another host, report \`blocked\`."
-    w='(^|[;&|(`]|\$\()[[:space:]]*(((timeout|env|command|exec|nice|nohup|time)|-[^[:space:]]*|[0-9]+[smhd]?|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*)[[:space:]]+)*'
-    grep -qE "${w}(ssh|scp|sftp|ssh-add|ssh-agent)([[:space:]]|$)" <<<"$cmd" \
-      && block "ssh/scp/sftp/ssh-add/ssh-agent. $ssh_why"
+    w='(^|[;&|(`]|\$\()[[:space:]]*(((timeout|env|command|exec|nice|nohup|time|xargs)|([^[:space:]]*/)?(ba|z|da)?sh[[:space:]]+-[a-zA-Z]*c|-[^[:space:]]*|[0-9]+[smhd]?|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*)[[:space:]]+)*'
+    grep -qE "${w}[\"']?([^[:space:]\"']*/)?(ssh|scp|sftp|ssh-add|ssh-agent)([[:space:]\"']|$)" <<<"$cmd" \
+      && block "ssh/scp/sftp/ssh-add/ssh-agent (also by path, or as the command of bash -c, sh -c or xargs). $ssh_why"
+    grep -qE "(^|[;&|(\`[:space:]])rsync[[:space:]]+([^;&|]*[[:space:]])?(-[a-zA-Z]*e|--rsh)[[:space:]=]+[\"']?([^[:space:]\"']*/)?ssh([[:space:]\"']|$)" <<<"$cmd" \
+      && block "rsync over ssh (-e ssh, --rsh=ssh). $ssh_why"
     grep -qE 'SSH_AUTH_SOCK|/ssh-agent' <<<"$cmd" \
       && block "touching the SSH agent socket (SSH_AUTH_SOCK, /ssh-agent). $ssh_why"
     grep -qE 'GIT_SSH|core\.sshCommand' <<<"$cmd" \

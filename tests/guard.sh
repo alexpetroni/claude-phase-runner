@@ -56,6 +56,18 @@ for r in build review; do
   # shellcheck disable=SC2016  # the single-quoted text IS the command under test
   block $r "$(bash_call 'echo $(ssh host hostname)')"                       "$r: ssh inside \$( )"
   block $r "$(bash_call 'env FOO=1 ssh host')"                              "$r: ssh after env VAR=…"
+  block $r "$(bash_call '/usr/bin/ssh git@github.com')"                     "$r: ssh by absolute path"
+  block $r "$(bash_call './ssh host')"                                      "$r: ssh by relative path"
+  block $r "$(bash_call "bash -c 'ssh host'")"                              "$r: ssh as the command of bash -c"
+  block $r "$(bash_call 'sh -c "scp a host:b"')"                            "$r: scp as the command of sh -c"
+  block $r "$(bash_call 'find . | xargs ssh host')"                         "$r: ssh as the command of xargs"
+  block $r "$(bash_call 'rsync -e ssh a host:b')"                           "$r: rsync -e ssh"
+  block $r "$(bash_call 'rsync --rsh=ssh a host:b')"                        "$r: rsync --rsh=ssh"
+  block $r "$(bash_call 'rsync --rsh ssh a host:b')"                        "$r: rsync --rsh ssh"
+  allow $r "$(bash_call 'rsync -a src/ dest/')"                             "$r: rsync between local paths"
+  allow $r "$(bash_call "bash -c 'echo ssh'")"                              "$r: bash -c with the word ssh in a string"
+  allow $r "$(bash_call 'cat /etc/ssh/ssh_config')"                         "$r: read the ssh client config"
+  allow $r "$(bash_call 'ls ~/.ssh')"                                       "$r: list ~/.ssh"
   block $r "$(bash_call 'ssh-add -l')"                                      "$r: ssh-add -l"
   # shellcheck disable=SC2016  # the single-quoted text IS the command under test
   block $r "$(bash_call 'eval $(ssh-agent -s)')"                            "$r: ssh-agent"

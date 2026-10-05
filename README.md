@@ -357,12 +357,14 @@ phase files or `.phase-runner/`** — through file tools or shell redirects.
 Reading them is fine. **No SSH**, because the forwarded agent is the runner's
 push credential: no `ssh`, `scp`, `sftp`, `ssh-add` or `ssh-agent` at a
 command position (also after `timeout N`, `env VAR=…`, `&&`, `;`, `|` or
-inside `$( )`), no command that mentions `SSH_AUTH_SOCK` or `/ssh-agent`, and
+inside `$( )`; named by its path, `/usr/bin/ssh` or `./ssh`; as the command
+of `bash -c`, `sh -c` or `xargs`), no `rsync` with `-e ssh` or `--rsh=ssh`,
+no command that mentions `SSH_AUTH_SOCK` or `/ssh-agent`, and
 no git command with its own SSH transport (a `git@host:` or `ssh://` URL,
 `core.sshCommand`, `GIT_SSH`, `GIT_SSH_COMMAND`). Public sources over HTTPS
 (`git clone https://…`, `git ls-remote https://…`), `git fetch` on the
-existing remote, and reading or grepping files that contain the word stay
-allowed.
+existing remote, `rsync` between local paths, and reading or grepping files
+that contain the word (`cat /etc/ssh/ssh_config`, `ls ~/.ssh`) stay allowed.
 
 Read-only roles (reviewer, preflight, final review): additionally no edit
 tools at all, no git mutation of any kind, no publishing. After a read-only
