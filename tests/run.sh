@@ -852,6 +852,9 @@ assert_grep $'\tgate\t1\tgreen\t' "$STATE/runs.tsv"
 assert_eq "$(cat "$TMP/pre-push.saw")" /tmp/fake-agent.sock "pre-push hook saw the driver's SSH_AUTH_SOCK"
 assert_grep 'Pushed main to origin' "$OUT"
 assert_eq "$(git -C "$remote" rev-parse main)" "$(git -C "$p" rev-parse HEAD)" "remote has HEAD"
+assert_eq "$(grep -c 'Push remote origin (' "$OUT")" 1 "one early-check line"
+assert_grep 'Push remote origin \(.*remote-sshagent.git\) is reachable' "$OUT"
+assert_not_grep 'NOT reachable' "$OUT"
 assert_grep 'No SSH .* the runner holds the push credentials' "$FAKE/1.prompt"
 assert_grep 'No SSH .* the runner holds the push credentials' "$FAKE/3.prompt"
 unset n remote
@@ -867,6 +870,27 @@ SSH_AUTH_SOCK=/tmp/fake-agent.sock RUNNER_MODE=review run_driver "$p" final-revi
 assert_eq "$RC" 0 "rc (review)"
 assert_file "$FAKE/1.env"
 assert_not_grep 'SSH_AUTH_SOCK' "$FAKE/1.env"
+
+scenario "push access: an unreachable remote in preflight warns, names the remote, completes, never pushes"
+p="$(new_project pushcheck)"
+git -C "$p" remote add origin "$TMP/no-such-remote.git"
+PUSH=1 RUNNER_MODE=preflight run_driver "$p" preflight:ok
+assert_eq "$RC" 0 "rc"
+assert_grep 'Push remote origin \(.*no-such-remote.git\) is NOT reachable' "$OUT"
+assert_grep 'no SSH agent forwarded' "$OUT"
+assert_grep 'bad token in an HTTPS remote URL' "$OUT"
+assert_grep 'MARKER-REPORT' "$STATE/TOOLING.md"
+assert_not_grep 'Pushed|Push failed' "$OUT"
+assert_not_grep $'\tpush\t' "$STATE/runs.tsv"
+assert_grep 'does not appear to be a git repository' "$STATE/logs/push.log"
+
+scenario "push access: PUSH=0 never contacts the remote"
+p="$(new_project pushcheck0)"
+git -C "$p" remote add origin "$TMP/no-such-remote.git"
+run_driver "$p" build:ok review:PASS
+assert_eq "$RC" 0 "rc"
+assert_not_grep 'Push remote' "$OUT"
+assert_no_file "$STATE/logs/push.log"
 
 # shellcheck source=guard.sh
 source "$KIT/tests/guard.sh"

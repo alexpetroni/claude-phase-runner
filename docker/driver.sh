@@ -377,6 +377,24 @@ report_pass() {
   log "$role report written to $(rel "$out")"
 }
 
+# ── Push access ───────────────────────────────────────────────────────────────
+# The runner, not the agent, holds the push credentials, so the runner checks
+# them: one read-only contact with the push remote before the first agent is
+# launched turns "push failed 3 times" after the first phase into a warning in
+# the first minute. Only a warning — the work is committed locally either way
+# and the next run pushes the backlog.
+check_push_access() {
+  [[ "$PUSH" == "1" ]] || return 0
+  case "$MODE" in build|preflight) ;; *) return 0 ;; esac
+  local url
+  url="$(git remote get-url "$GIT_REMOTE" 2>/dev/null || echo "?")"
+  if timeout --kill-after=10 30 git ls-remote "$GIT_REMOTE" HEAD >>"$LOGS/push.log" 2>&1; then
+    log "Push remote $GIT_REMOTE ($url) is reachable"
+  else
+    warn "Push remote $GIT_REMOTE ($url) is NOT reachable (logs/push.log) — pushing will fail. Usual causes: no SSH agent forwarded (eval \$(ssh-agent); ssh-add on the host) or a bad token in an HTTPS remote URL. The run continues: work is committed locally and the next run pushes the backlog."
+  fi
+}
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 log "Phase runner ($MODE) in $PROJECT_DIR — branch $GIT_BRANCH, remote $GIT_REMOTE"
 log "Phases: ${PHASES[*]}"
@@ -384,6 +402,7 @@ log "Builder: $(role_desc build)${BUILD_BUDGET_USD:+, budget \$$BUILD_BUDGET_USD
 log "Subagents: ${SUBAGENT_MODEL:-inherit the parent model} · inline Bash output ≤ ${BASH_OUTPUT_MAX_CHARS:-30000 (Claude Code default)} chars · per-phase overrides: $([[ -f "$MANIFEST" ]] && echo "$(rel "$MANIFEST")" || echo none)"
 log "Retry schedule: ${SCHEDULE[*]}s; stall timeout: ${STALL_TIMEOUT}s; guard hook: $(onoff "$GUARD"); docker socket: $(onoff "$DOCKER_SOCKET")"
 log "Bash tool: default timeout ${BASH_TIMEOUT}s, maximum ${BASH_TIMEOUT_MAX}s; background tasks: $(onoff "$BACKGROUND_TASKS")"
+check_push_access
 
 case "$MODE" in
   dry-run)
