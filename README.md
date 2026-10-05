@@ -43,7 +43,8 @@ docker/lib/               claude.sh (roles, retries, watchdog) · git.sh · comm
 docker/guard.sh           the enforcement hook (per-role rules, tested)
 prompts/*.md              builder, fix (fresh or resumed), reviewer, preflight, final-review instructions, the rules and no-Docker notes — edit freely
 templates/                runner.env, phases, credentials.env starting points
-tests/                    bash tests/run.sh — driver, CLI and guard tests with a fake `claude`
+tests/                    bash tests/run.sh — driver, CLI, lint and guard tests with a fake `claude`; smoke.sh — the real container, dry run, no API call
+.github/workflows/ci.yml  both on every push and pull request: run.sh (job `test`) and smoke.sh (job `smoke`)
 docker-compose.yml        container definition (same-path repo mount, optional host Docker socket, agent home)
 
 <project>/.phase-runner/  created by `phase-runner init`, excluded via .git/info/exclude
@@ -575,7 +576,8 @@ skipped), per-phase manifest options, per-role model/effort, subagent model
 and output cap, `FIX_CONTEXT=resume` with fallback, dry run, two phases,
 committed verdicts, reviewer leaving files, uncommitted leftovers, preflight,
 final review, the host CLI, the `DOCKER_SOCKET` switch (with a fake `docker`),
-the CLI refusing to build the kit itself, the Bash tool settings (defaults
+`RUNNER_IMAGE` as the image name the CLI inspects (default
+`claude-phase-runner:latest`), the CLI refusing to build the kit itself, the Bash tool settings (defaults
 and explicit values as every role's process receives them, derived defaults
 from a small `STALL_TIMEOUT`, invalid values stopping the run before any
 agent, the banner line and the minutes stated in the prompts), the driver log
@@ -587,12 +589,63 @@ process and the gate without `SSH_AUTH_SOCK` while a `pre-push` hook sees the
 driver's value and the push to a bare remote succeeds; the early push-access
 check: one line for a reachable remote, a warning naming an unreachable one
 in `preflight` with no push attempted, nothing contacted with `PUSH=0`) — plus every
-guard rule. The suite
+guard rule and the lint scenario below. The suite
 ignores the caller's environment: it re-executes itself once under `env -i`
 with only `PATH`, `HOME` and `TMPDIR`, so exported runner settings (inside a
 runner container, or on your machine) cannot change what a scenario asserts;
 a canary scenario at the start checks that none of the `environment:` keys of
 `docker-compose.yml` is present. Add a scenario with each behaviour change.
+
+### CI, lint and the container smoke test
+
+`.github/workflows/ci.yml` runs on every push and pull request, with no
+secret and `contents: read` only, two independent jobs on `ubuntu-latest`:
+`test` installs `jq` and `shellcheck` and runs `bash tests/run.sh`; `smoke`
+runs `bash tests/smoke.sh`. The actions are pinned to released tags
+(`actions/checkout@v7.0.1`, checked against `git ls-remote --tags` and the
+releases API when it was pinned).
+
+**Lint** is a scenario of `tests/run.sh`: `shellcheck -x -S warning` over
+every shell script of the kit — `bin/*`, `docker/*.sh`, `docker/lib/*.sh`,
+`tests/*.sh`, `tests/bin/*`, a list built from the directories, so a new
+script is covered without editing the test. The kit is clean at that level;
+a finding shellcheck cannot judge (a global set in one file and read in a
+sourced one) is silenced on that line only, with a comment saying where the
+variable is read. Without `shellcheck` on `PATH` the scenario prints one
+`SKIP` line and passes, so the suite still runs anywhere; the skip path is
+itself exercised with `shellcheck` hidden.
+
+**The smoke test**, `tests/smoke.sh`, is the real container end to end with
+no API call: it builds the image, then runs the real CLI in `build --dry-run`
+mode against a throwaway project with a dummy `ANTHROPIC_API_KEY`, once per
+`DOCKER_SOCKET` value, and checks the lines only a container shows — the
+bootstrap's socket line, the dry-run banner and the no-Docker note in the
+printed builder prompt (present with `0`, absent with `1`). With `0` it also
+starts the container with an entrypoint override and checks that `docker
+info` fails inside. The throwaway project is created with `state/logs` and
+`home` in place and made world-writable first, because the container's
+`node` user is uid 1000 and the host user may not be (GitHub's runner is
+1001). Run it locally with Docker available:
+
+```bash
+bash tests/smoke.sh          # a few minutes the first time (image build), seconds after
+```
+
+Without a reachable daemon it prints one `SKIP` line and exits 0. It leaves
+one thing behind, the image `claude-phase-runner:smoke` (a cache hit on the
+next run; `docker image rm claude-phase-runner:smoke` drops it); the
+throwaway project and the credentials file are removed on exit, and on a
+failed assertion it prints the last lines of each log and exits non-zero.
+The tag comes from **`RUNNER_IMAGE`**: `docker-compose.yml` names the image
+`${RUNNER_IMAGE:-claude-phase-runner:latest}` and `bin/phase-runner`
+inspects that same name, so an exported `RUNNER_IMAGE` makes a run build and
+use a tag of its own while real runs keep `claude-phase-runner:latest`. It is
+an environment override for testing, not a `runner.env` setting.
+
+Status: the smoke test was written in a run without a Docker daemon and
+checked statically only (`bash -n`, the lint scenario, its `SKIP` path); its
+main path has not been executed yet. Run `bash tests/smoke.sh` once on a host
+with Docker, or watch the first `smoke` job in CI, and remove this note.
 
 ### Building the kit with the kit
 
