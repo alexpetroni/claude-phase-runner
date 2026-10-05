@@ -17,6 +17,9 @@
 # retry count. Retries resume the SAME session by id (never "the most recent
 # conversation", which could belong to another phase), so in-flight context is
 # kept. A clean non-transient failure is never retried into submission.
+# A subscription usage window is judged by the CLI's rejected rate_limit_event,
+# which says when the window resets (see run_agent): waited out when the reset
+# is within LIMIT_WAIT_MAX, an honest stop when it is further away.
 
 read -r -a SCHEDULE <<< "${RETRY_SCHEDULE:-30 300 3600 10800}"
 STALL_TIMEOUT="${STALL_TIMEOUT:-1800}"
@@ -135,6 +138,7 @@ role_args() {
 # watchdog distinguish "thinking about a long build" from "API went dark".
 run_claude() {
   local logfile="$1" role="$2" session="$3" prompt="$4" rc pid watchdog
+  ATTEMPT_START=$(stat -c %s "$logfile" 2>/dev/null || echo 0)
   role_args "$role"
   local args=(--dangerously-skip-permissions --output-format stream-json --verbose "${ROLE_ARGS[@]}")
   case "$session" in
@@ -170,10 +174,20 @@ run_claude() {
   return "$rc"
 }
 
-# The last lines of the log plus the text of the last result event — the CLI's
-# final error message may sit in either place. Buffered into a variable: with
+# ── Judging a failed attempt ────────────────────────────────────────────────
+# Retries and re-runs append to one log file, so an event or an error text
+# left by an earlier attempt or an earlier run must never decide a later
+# failure: everything below reads attempt_text, what the attempt being judged
+# appended. run_claude records where that starts.
+ATTEMPT_START=0
+attempt_text() { tail -c +$(( ATTEMPT_START + 1 )) "$1" 2>/dev/null; }
+# The text of the attempt's last result event — the CLI's final error message.
+result_text() { attempt_text "$1" | jq -R -c 'fromjson? | select(.type=="result")' 2>/dev/null | tail -1 | jq -r '.result // empty' 2>/dev/null; }
+
+# The attempt's last lines plus its result text — the CLI's final error message
+# may sit in either place. Buffered into a variable by the callers: with
 # pipefail, `producer | grep -q` fails on SIGPIPE when grep matches early.
-log_tail() { { tail -12 "$1"; last_result "$1" | jq -r '.result // empty' 2>/dev/null; } 2>/dev/null; }
+log_tail() { { attempt_text "$1" | tail -12; result_text "$1"; } 2>/dev/null; }
 
 is_transient() {
   local t; t="$(log_tail "$1")"
@@ -182,30 +196,52 @@ is_transient() {
     || usage_limited_text "$t"
 }
 
-# A subscription usage window ("You've hit your session limit · resets 3:20pm")
-# is transient: it resets on its own. Being out of usage credits is not.
+# Without a rejected event, the wording decides: a limit that was hit ("You've
+# hit your session limit · resets 3:20pm") resets on its own and is transient;
+# being out of usage credits is not.
 usage_limited_text() { grep -qiE "hit your (session|weekly|[a-z]+) limit|usage limit" <<<"$1"; }
 out_of_credits_text() { grep -qiE 'out of usage credits|insufficient credits|credit balance' <<<"$1"; }
 out_of_credits() { out_of_credits_text "$(log_tail "$1")"; }
 
-# Seconds until the usage window resets, from the CLI's last rate_limit_event
-# (0 when unknown). Retries wait for this instead of the fixed schedule slot.
-limit_reset_wait() {
-  local at now
-  at="$(jq -R -r 'fromjson? | select(.type=="rate_limit_event" and .rate_limit_info.status=="rejected") | .rate_limit_info.resetsAt // empty' "$1" 2>/dev/null | tail -1)"
-  [[ "$at" =~ ^[0-9]+$ ]] || { echo 0; return; }
-  now=$(date +%s)
-  (( at > now )) && echo $(( at - now + ${LIMIT_WAIT_GRACE:-60} )) || echo 0
+# limit_event LOGFILE → 0 and LIMIT_TYPE, LIMIT_RESET (epoch seconds) from the
+# attempt's last rejected rate_limit_event that carries a usable resetsAt; 1
+# when there is none. Only rate_limit_info.status says whether the request was
+# rejected: a healthy run's `allowed` events carry overageStatus "rejected" and
+# overageDisabledReason "out_of_credits" too — those describe the account.
+# The CLI's wording varies for the same window, so the event outranks the text.
+limit_event() {
+  local ev
+  ev="$(attempt_text "$1" | jq -R -r 'fromjson? | select(.type=="rate_limit_event" and .rate_limit_info.status=="rejected" and (.rate_limit_info.resetsAt|type)=="number") | "\(.rate_limit_info.resetsAt|floor) \(.rate_limit_info.rateLimitType // "unknown")"' 2>/dev/null | tail -1)"
+  LIMIT_RESET="${ev%% *}"; LIMIT_TYPE="${ev#* }"
+  [[ "$LIMIT_RESET" =~ ^[1-9][0-9]*$ ]]
+}
+utc_time() { date -u -d "@$1" '+%F %H:%M UTC'; }
+
+# The abort message for a usage limit: which window, when it resets and how far
+# away that is, what the CLI said, and how to continue. Reaches SUMMARY.md via die.
+limit_hint() {
+  local left; left=$(( LIMIT_RESET - $(date +%s) ))
+  printf 'usage limit: the %s window resets at %s' "$LIMIT_TYPE" "$(utc_time "$LIMIT_RESET")"
+  if (( left > 0 )); then
+    printf ' (in %dh %02dm' $(( left / 3600 )) $(( left % 3600 / 60 ))
+    (( left > LIMIT_WAIT_MAX )) && printf ', further away than LIMIT_WAIT_MAX=%ss' "$LIMIT_WAIT_MAX"
+    printf ')'
+  else
+    printf ' (already passed)'
+  fi
+  printf '; the CLI said "%s" — re-run `phase-runner build` after that time to resume where the run stopped, or raise LIMIT_WAIT_MAX to make the runner wait instead' "$(result_text "$1")"
 }
 
 no_session() {
-  tail -8 "$1" | grep -qiE 'no conversation (found|to continue)|session .* not found'
+  local t; t="$(attempt_text "$1" | tail -8)"
+  grep -qiE 'no conversation (found|to continue)|session .* not found' <<<"$t"
 }
 
 # What a non-zero, non-transient exit most likely was — for the abort message.
 failure_hint() {
-  local tail8; tail8="$(tail -8 "$1")"
-  if out_of_credits "$1"; then echo "the subscription is out of usage credits — top up, wait for the window, or switch to API billing"
+  local tail8; tail8="$(attempt_text "$1" | tail -8)"
+  if limit_event "$1"; then limit_hint "$1"
+  elif out_of_credits "$1"; then echo "the subscription is out of usage credits — top up, wait for the window, or switch to API billing"
   elif grep -qiE 'max.?budget|budget cap|exceeded.*budget' <<<"$tail8"; then echo "the run hit its --max-budget-usd cap"
   elif grep -qiE 'max.?turns' <<<"$tail8"; then echo "the run hit its max-turns cap"
   elif grep -qiE 'authentication|unauthorized|invalid.*token|401' <<<"$tail8"; then echo "authentication failed — check credentials.env"
@@ -243,15 +279,25 @@ run_agent() {
     fi
     (( rc == 0 )) && return 0
 
-    if (( attempt < max_attempts )) && is_transient "$logfile"; then
+    if (( attempt < max_attempts )); then
       delay="${SCHEDULE[$((attempt-1))]}"
-      wait="$(limit_reset_wait "$logfile")"
-      if (( wait > 0 )); then
-        (( wait > LIMIT_WAIT_MAX )) && wait="$LIMIT_WAIT_MAX"
-        (( wait > delay )) && delay="$wait"
-        log "Usage limit reached ($role, attempt $attempt/$max_attempts) — waiting ${delay}s for the window to reset, then resuming"
-      else
+      if limit_event "$logfile"; then
+        # The event decides. A window that resets within LIMIT_WAIT_MAX is
+        # waited out; one that resets later stops the run at once (sleeping
+        # LIMIT_WAIT_MAX towards a certain rejection helps nobody); one that
+        # has reset already is a plain retry, whatever the text said.
+        wait=$(( LIMIT_RESET - $(date +%s) ))
+        (( wait > LIMIT_WAIT_MAX )) && return "$rc"
+        if (( wait > 0 )); then
+          delay=$(( wait + ${LIMIT_WAIT_GRACE:-60} ))
+          log "Usage limit reached ($role, attempt $attempt/$max_attempts): the $LIMIT_TYPE window resets at $(utc_time "$LIMIT_RESET") — waiting ${delay}s, then resuming"
+        else
+          log "Usage window reset already ($role, attempt $attempt/$max_attempts): the $LIMIT_TYPE window reset at $(utc_time "$LIMIT_RESET") — retrying in ${delay}s"
+        fi
+      elif is_transient "$logfile"; then
         log "Transient API failure ($role, attempt $attempt/$max_attempts, rc=$rc) — retrying in ${delay}s"
+      else
+        return "$rc"
       fi
       sleep "$delay"
       continue

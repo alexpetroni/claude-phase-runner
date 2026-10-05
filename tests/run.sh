@@ -426,22 +426,113 @@ MAX_FIX_ROUNDS=0 run_driver "$p" build:ok review:FAIL
 assert_eq "$RC" 1 "rc"
 assert_no_file "$STATE/progress/A.md"
 
+# ── Usage limits: the rejected rate_limit_event decides, scoped to the attempt ──
 scenario "usage limit → wait for the window to reset, resume the same session"
 p="$(new_project limit)"
 LIMIT_WAIT_GRACE=0 run_driver "$p" build:limit build:ok review:PASS
 assert_eq "$RC" 0 "rc"
 assert_eq "$(invocations)" 3 "invocations"
 assert_grep 'Usage limit reached' "$OUT"
+assert_grep 'the five_hour window resets at [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} UTC — waiting' "$OUT"
+assert_eq "$(arg_after 2 --resume)" "$(arg_after 1 --session-id)" "resume uses the first session id"
+assert_grep '^plan/A.md$' "$STATE/phases-done"
+assert_grep '"unifiedWindows"' "$STATE/logs/A.md.build.log"              # the fake speaks the real dialect
+assert_grep '"overageStatus":"rejected"' "$STATE/logs/A.md.build.log"
+assert_grep "hit your session limit · resets 4:10pm \(UTC\)" "$STATE/logs/A.md.build.log"
+
+scenario "five-hour limit announced as 'out of usage credits · resets …' → the event decides: waited out, not a stop"
+p="$(new_project limitcredits)"
+LIMIT_WAIT_GRACE=0 run_driver "$p" build:limitcredits build:ok review:PASS
+assert_eq "$RC" 0 "rc"
+assert_eq "$(invocations)" 3 "invocations"
+assert_grep 'Usage limit reached .*the five_hour window resets at' "$OUT"
+assert_not_grep 'out of usage credits — top up' "$OUT"
+assert_eq "$(arg_after 2 --resume)" "$(arg_after 1 --session-id)" "resume uses the first session id"
+assert_grep '^plan/A.md$' "$STATE/phases-done"
+assert_grep "out of usage credits · resets 8:40pm \(UTC\)" "$STATE/logs/A.md.build.log"
+
+# A reset further away than LIMIT_WAIT_MAX is an honest stop, at once. The cap
+# is low in these scenarios so that a regression into waiting costs seconds
+# and a second invocation, not a day of sleep.
+scenario "weekly limit resetting after LIMIT_WAIT_MAX → stops at once and says when to come back"
+p="$(new_project weekly)"
+t0=$(date +%s)
+LIMIT_WAIT_MAX=30 run_driver "$p" build:weekly
+assert_eq "$RC" 1 "rc"
+assert_eq "$(invocations)" 1 "invocations"
+(( $(date +%s) - t0 < 20 )) && ok || bad "the driver slept instead of stopping"
+assert_not_grep 'Usage limit reached|Retry [0-9]' "$OUT"
+reset_at="$(jq -R -r 'fromjson? | select(.type=="rate_limit_event") | .rate_limit_info.resetsAt' "$STATE/logs/A.md.build.log" | tail -1)"
+reset_str="$(date -u -d "@$reset_at" '+%F %H:%M UTC')"
+for f in "$OUT" "$STATE/SUMMARY.md"; do
+  assert_grep "usage limit: the seven_day_overage_included window resets at $reset_str \(in 2[34]h [0-9]{2}m, further away than LIMIT_WAIT_MAX=30s\)" "$f"
+  assert_grep "the CLI said \"You're out of usage credits\. Switch to another model to continue\.\"" "$f"
+  assert_grep 're-run `phase-runner build` after that time to resume where the run stopped, or raise LIMIT_WAIT_MAX to make the runner wait instead' "$f"
+done
+assert_grep 'FAILED' "$STATE/SUMMARY.md"
+assert_grep '"unifiedWindows"' "$STATE/logs/A.md.build.log"
+unset t0 reset_at reset_str f
+
+scenario "the same weekly limit with LIMIT_WAIT_MAX above the distance → waited out, resumed"
+p="$(new_project weeklywait)"
+FAKE_LIMIT_RESET_IN=3 LIMIT_WAIT_MAX=30 LIMIT_WAIT_GRACE=0 run_driver "$p" build:weekly build:ok review:PASS
+assert_eq "$RC" 0 "rc"
+assert_eq "$(invocations)" 3 "invocations"
+assert_grep 'Usage limit reached .*the seven_day_overage_included window resets at' "$OUT"
+assert_not_grep 'out of usage credits — top up' "$OUT"
 assert_eq "$(arg_after 2 --resume)" "$(arg_after 1 --session-id)" "resume uses the first session id"
 assert_grep '^plan/A.md$' "$STATE/phases-done"
 
-scenario "out of usage credits is an honest stop, not a retry"
+scenario "out of usage credits with no rejected event is an honest stop, not a retry"
 p="$(new_project nocredits)"
 run_driver "$p" build:nocredits
 assert_eq "$RC" 1 "rc"
 assert_eq "$(invocations)" 1 "invocations"
-assert_grep 'out of usage credits' "$OUT"
-assert_not_grep 'Usage limit reached' "$OUT"
+assert_grep 'out of usage credits — top up' "$OUT"
+assert_not_grep 'Usage limit reached|window resets' "$OUT"
+assert_grep "/model to switch models\." "$STATE/logs/A.md.build.log"
+assert_not_grep '"status":"rejected"' "$STATE/logs/A.md.build.log"     # the text alone decides here
+
+scenario "rejection whose reset has passed → retried on RETRY_SCHEDULE, whatever the text says"
+p="$(new_project limitpassed)"
+FAKE_LIMIT_RESET_IN=-5 run_driver "$p" build:weekly build:ok review:PASS
+assert_eq "$RC" 0 "rc"
+assert_eq "$(invocations)" 3 "invocations"
+assert_grep 'Usage window reset already .*the seven_day_overage_included window reset at' "$OUT"
+assert_not_grep 'out of usage credits — top up|Usage limit reached' "$OUT"
+assert_eq "$(arg_after 2 --resume)" "$(arg_after 1 --session-id)" "resume uses the first session id"
+assert_grep '^plan/A.md$' "$STATE/phases-done"
+
+# Retries and re-runs append to one log file: a rejected event and an
+# out-of-credit text left by yesterday's run must not decide today's 529.
+scenario "stale rejection left in the log by an earlier run does not decide a later transient failure"
+p="$(new_project stalelimit)"
+mkdir -p "$p/.phase-runner/state/logs"
+printf '%s\n' \
+  "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"resetsAt\":$(( $(date +%s) + 10800 )),\"rateLimitType\":\"seven_day_overage_included\",\"overageStatus\":\"rejected\",\"overageDisabledReason\":\"out_of_credits\",\"isUsingOverage\":false}}" \
+  "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"duration_ms\":1000,\"total_cost_usd\":0.3,\"num_turns\":2,\"session_id\":\"old\",\"result\":\"You're out of usage credits. Switch to another model to continue.\"}" \
+  > "$p/.phase-runner/state/logs/A.md.build.log"
+t0=$(date +%s)
+LIMIT_WAIT_MAX=30 run_driver "$p" build:transient build:ok review:PASS
+assert_eq "$RC" 0 "rc"
+assert_eq "$(invocations)" 3 "invocations"
+assert_grep 'Transient API failure' "$OUT"
+assert_not_grep '[Uu]sage (limit|window)|out of usage credits' "$OUT"
+(( $(date +%s) - t0 < 20 )) && ok || bad "the driver waited for the stale window"
+assert_eq "$(arg_after 2 --resume)" "$(arg_after 1 --session-id)" "resume uses the first session id"
+assert_grep '^plan/A.md$' "$STATE/phases-done"
+unset t0
+
+scenario "an allowed rate_limit_event carrying overageStatus rejected is never a rejection"
+p="$(new_project allowed)"
+LIMIT_WAIT_MAX=30 run_driver "$p" build:allowed build:ok review:PASS
+assert_eq "$RC" 0 "rc"
+assert_eq "$(invocations)" 3 "invocations"
+assert_grep 'Transient API failure' "$OUT"
+assert_not_grep '[Uu]sage (limit|window)' "$OUT"
+assert_grep '"status":"allowed"' "$STATE/logs/A.md.build.log"
+assert_grep '"overageStatus":"rejected"' "$STATE/logs/A.md.build.log"
+assert_grep '^plan/A.md$' "$STATE/phases-done"
 
 scenario "FIX_CONTEXT=resume continues the builder's own session with the lean prompt"
 p="$(new_project fixresume)"
