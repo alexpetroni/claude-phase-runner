@@ -15,7 +15,9 @@
 #
 # Every role:   no git push, no destructive git, no history rewriting, no sudo,
 #               no rm -rf on root/home/.git, no docker prune (the socket is the
-#               host's), no curl|sh, no modifying protected paths.
+#               host's), no curl|sh, no modifying protected paths, no SSH
+#               (client, agent socket, git over SSH — the runner holds the
+#               push credentials).
 # Read-only roles (review, preflight, final-review): additionally no edit tools,
 #               no git mutations at all, no publishing.
 set -uo pipefail
@@ -110,6 +112,22 @@ case "$tool" in
       && block "docker prune acts on the HOST daemon (the socket is the host's). Remove only this project's resources by name."
     grep -qiE '(curl|wget)[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(ba|z|da)?sh([[:space:]]|$)' <<<"$cmd" \
       && block "piping a download straight into a shell."
+
+    # The forwarded SSH agent is the runner's push credential and opens every
+    # host the human's keys open. The agent runs without it (SSH_AUTH_SOCK is
+    # unset) and must not reach for it: no SSH client at a command position
+    # (also after timeout/env/assignments, a separator or inside $( )), no
+    # mention of the socket, no git command that brings its own SSH transport.
+    ssh_why="The runner holds the push credentials (the forwarded SSH agent); the agent runs without SSH. Use public sources over HTTPS (git clone https://…); if the phase needs authenticated access to another host, report \`blocked\`."
+    w='(^|[;&|(`]|\$\()[[:space:]]*(((timeout|env|command|exec|nice|nohup|time)|-[^[:space:]]*|[0-9]+[smhd]?|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*)[[:space:]]+)*'
+    grep -qE "${w}(ssh|scp|sftp|ssh-add|ssh-agent)([[:space:]]|$)" <<<"$cmd" \
+      && block "ssh/scp/sftp/ssh-add/ssh-agent. $ssh_why"
+    grep -qE 'SSH_AUTH_SOCK|/ssh-agent' <<<"$cmd" \
+      && block "touching the SSH agent socket (SSH_AUTH_SOCK, /ssh-agent). $ssh_why"
+    grep -qE 'GIT_SSH|core\.sshCommand' <<<"$cmd" \
+      && block "GIT_SSH/GIT_SSH_COMMAND/core.sshCommand (git with its own SSH transport). $ssh_why"
+    grep -qE '(^|[;&|(`[:space:]])git[[:space:]]' <<<"$cmd" && grep -qE 'ssh://|git@[^[:space:]:/]+:' <<<"$cmd" \
+      && block "git over SSH (git@host: or ssh:// URL). $ssh_why"
 
     if p="$(protected_in_cmd "$cmd")"; then
       grep -qE '(>|\bsed[[:space:]]+-[a-zA-Z]*i|\btee\b|\brm\b|\bmv\b|\bcp\b|\btruncate\b|\bperl[[:space:]]+-[a-zA-Z]*i|\bpatch\b|\bgit[[:space:]]+(checkout|restore|rm|mv)\b|\bchmod\b|\bln\b)' <<<"$cmd" \

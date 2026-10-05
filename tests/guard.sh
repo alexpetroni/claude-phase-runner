@@ -46,6 +46,36 @@ block build "$(edit_call 'plan/ENTRY.md')"                                'Edit 
 block build "$(write_call './.phase-runner/state/phases-done')"           'Write into .phase-runner'
 block fix   "$(bash_call 'git push')"                                     'fix role: git push'
 
+# SSH is the runner's push credential — blocked for a builder and a read-only role alike
+for r in build review; do
+  block $r "$(bash_call 'ssh git@github.com')"                              "$r: ssh"
+  block $r "$(bash_call 'timeout 20 ssh -o BatchMode=yes git@github.com')" "$r: ssh after timeout N"
+  block $r "$(bash_call 'cd x && scp a host:b')"                            "$r: scp after &&"
+  block $r "$(bash_call 'ls; sftp host')"                                   "$r: sftp after ;"
+  block $r "$(bash_call 'echo y | ssh host cmd')"                           "$r: ssh after |"
+  # shellcheck disable=SC2016  # the single-quoted text IS the command under test
+  block $r "$(bash_call 'echo $(ssh host hostname)')"                       "$r: ssh inside \$( )"
+  block $r "$(bash_call 'env FOO=1 ssh host')"                              "$r: ssh after env VAR=…"
+  block $r "$(bash_call 'ssh-add -l')"                                      "$r: ssh-add -l"
+  # shellcheck disable=SC2016
+  block $r "$(bash_call 'eval $(ssh-agent -s)')"                            "$r: ssh-agent"
+  block $r "$(bash_call 'SSH_AUTH_SOCK=/ssh-agent git fetch')"              "$r: SSH_AUTH_SOCK= prefix"
+  block $r "$(bash_call 'ls -l /ssh-agent')"                                "$r: the socket path"
+  block $r "$(bash_call 'git clone git@github.com:o/r.git')"                "$r: git clone git@host:"
+  block $r "$(bash_call 'git fetch ssh://git@host/o/r.git')"                "$r: git fetch ssh://"
+  block $r "$(bash_call 'git -c core.sshCommand="ssh -i k" fetch')"         "$r: core.sshCommand"
+  block $r "$(bash_call 'GIT_SSH_COMMAND="ssh -v" git pull')"               "$r: GIT_SSH_COMMAND"
+  block $r "$(bash_call 'export GIT_SSH=/tmp/s')"                           "$r: GIT_SSH"
+  allow $r "$(bash_call 'git clone https://github.com/o/r.git /tmp/r')"     "$r: git clone https"
+  allow $r "$(bash_call 'git ls-remote https://github.com/o/r.git')"        "$r: git ls-remote https"
+  allow $r "$(bash_call 'git fetch origin')"                                "$r: git fetch origin"
+  allow $r "$(bash_call 'git log origin/main..HEAD')"                       "$r: git log on the remote"
+  allow $r "$(bash_call 'grep -rn ssh README.md')"                          "$r: grep for the word ssh"
+  allow $r "$(bash_call 'cat docs/ssh-notes.md')"                           "$r: read a file named ssh-…"
+  allow $r "$(bash_call 'echo "use ssh keys"')"                             "$r: the word ssh in a string"
+done
+unset r
+
 allow build "$(bash_call 'pnpm lint && pnpm test')"                       'normal command'
 allow build "$(bash_call 'git add -A && git commit -m "feat: x"')"        'git commit'
 allow build "$(bash_call 'git checkout -b feat/x')"                       'checkout -b'
