@@ -89,9 +89,6 @@ load_config() {
   # shellcheck source=/dev/null
   source "$CONFIG"
   set +a
-  # The project is implied by where the config lives; a PROJECT_DIR left over
-  # from the old layout would be misleading.
-  if [[ -n "${PROJECT_DIR_FROM_ENV:-}" ]]; then :; fi
   [[ -n "${ENTRY_FILE:-}" ]] || die "ENTRY_FILE is not set in $(rel "$CONFIG")"
   [[ -f "$PROJECT_DIR/$ENTRY_FILE" ]] || die "entry file not found: $ENTRY_FILE (relative to $PROJECT_DIR)"
   if [[ -z "${PHASE_FILES:-}" ]]; then
