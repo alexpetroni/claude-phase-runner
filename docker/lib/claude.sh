@@ -275,7 +275,9 @@ run_agent() {
       run_claude "$logfile" "$role" "resume:$sid" "$(render_prompt continue)"; rc=$?
       if (( rc != 0 )) && no_session "$logfile"; then
         log "No session to resume — restarting the $role prompt from scratch"
-        sid="$(new_uuid)"; LAST_SESSION_ID="$sid"
+        sid="$(new_uuid)"
+        # shellcheck disable=SC2034  # read by the fix rounds in driver.sh (BUILD_SID)
+        LAST_SESSION_ID="$sid"
         run_claude "$logfile" "$role" "new:$sid" "$prompt"; rc=$?
       fi
     fi

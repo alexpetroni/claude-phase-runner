@@ -403,6 +403,7 @@ assert_eq "$(arg_after 5 --effort)" xhigh "phase B builder effort back to defaul
 assert_grep "unknown option 'bogus=1'" "$OUT"
 assert_grep 'Phase plan/A.md: builder model claude-sonnet-5, effort medium' "$OUT"
 # the host CLI hands the driver paths only
+# shellcheck source=/dev/null  # the function's text is cut out of bin/phase-runner at run time
 assert_eq "$( (source <(sed -n '/^read_manifest()/,/^}/p' "$KIT/bin/phase-runner"); read_manifest "$p/.phase-runner/phases") )" "plan/A.md plan/B.md" "read_manifest strips options"
 
 scenario "interrupted after the builder finished → re-run skips the builder, goes to gate + review"
@@ -566,7 +567,7 @@ run_driver "$p" build:ok review:PASS
 assert_grep 'ran the gate command `true` on this exact commit and it passed' "$FAKE/2.prompt"
 assert_grep 'do not re-run the whole gate' "$FAKE/2.prompt"
 p="$(new_project nogateprompt)"
-GATE_CMD= run_driver "$p" build:ok review:PASS
+GATE_CMD='' run_driver "$p" build:ok review:PASS
 assert_eq "$RC" 0 "rc"
 assert_grep 'No gate command is configured' "$FAKE/2.prompt"
 assert_not_grep 'and it passed' "$FAKE/2.prompt"
@@ -684,7 +685,7 @@ assert_grep 'SUCCESS' "$STATE/SUMMARY.md"
 
 scenario "host CLI: init, status, logs (no docker)"
 p="$(new_project cli)"
-out="$(bash "$KIT/bin/phase-runner" --project "$p" init 2>&1)"; rc=$?
+bash "$KIT/bin/phase-runner" --project "$p" init >/dev/null 2>&1; rc=$?
 assert_eq "$rc" 0 "init rc"
 assert_file "$p/.phase-runner/runner.env"
 assert_file "$p/.phase-runner/phases"
@@ -715,12 +716,12 @@ grep -qE "$TS INFO All phases complete$" <<<"$lg" && ok || bad "logs driver is n
 grep -q 'logs driver' <<<"$(tail -1 <<<"$st")" && ok || bad "status does not name the driver log in its last line: $(tail -1 <<<"$st")"
 grep -q 'logs driver' <<<"$(bash "$KIT/bin/phase-runner" --help)" && ok || bad "usage does not list 'logs driver'"
 assert_file "$FIXPASS_PROJECT/.phase-runner/state/logs/driver.log"
-out="$(bash "$KIT/bin/phase-runner" --project "$FIXPASS_PROJECT" reset --yes 2>&1)"; rc=$?
+bash "$KIT/bin/phase-runner" --project "$FIXPASS_PROJECT" reset --yes >/dev/null 2>&1; rc=$?
 assert_eq "$rc" 0 "reset rc"
 assert_no_file "$FIXPASS_PROJECT/.phase-runner/state/logs/driver.log"
 assert_no_file "$FIXPASS_PROJECT/.phase-runner/state"
 assert_file "$FIXPASS_PROJECT/.phase-runner/runner.env"
-out="$(bash "$KIT/bin/phase-runner" --project "$p" bogus 2>&1)"; rc=$?
+bash "$KIT/bin/phase-runner" --project "$p" bogus >/dev/null 2>&1; rc=$?
 assert_eq "$rc" 1 "unknown command rc"
 
 scenario "host CLI: DOCKER_SOCKET decides whether the host Docker socket is mounted (fake docker)"

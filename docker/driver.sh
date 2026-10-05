@@ -22,6 +22,7 @@ STATE="${RUNNER_STATE:-$PROJECT_DIR/.phase-runner/state}"
 LOGS="$STATE/logs"
 REVIEWS="$STATE/reviews"
 DONE_FILE="$STATE/phases-done"
+# shellcheck disable=SC2034  # read by record_run in lib/common.sh
 RUNS_FILE="$STATE/runs.tsv"
 BLOCKED_FILE="$STATE/blocked"
 mkdir -p "$LOGS" "$REVIEWS"
@@ -72,6 +73,7 @@ done
 resolve_bash_settings   # validates explicit BASH_TIMEOUT / BASH_TIMEOUT_MAX / BACKGROUND_TASKS before any agent runs
 
 # Paths the agent may read but never modify (enforced by docker/guard.sh).
+# shellcheck disable=SC2034  # read by run_claude in lib/claude.sh, which hands it to the guard
 PROTECTED_PATHS="$ENTRY_FILE:$(IFS=:; printf '%s' "${PHASES[*]}"):.phase-runner"
 ensure_exclude
 
@@ -87,6 +89,7 @@ phase_opts() {  # phase_opts PHASE
   local opts kv
   opts="$(sed -e 's/#.*//' "$MANIFEST" | awk -v p="$1" '$1 == p { $1 = ""; print; exit }')"
   for kv in $opts; do
+    # shellcheck disable=SC2034  # the PHASE_* globals are read by role_model/role_effort in lib/claude.sh
     case "${kv%%=*}" in
       model)         PHASE_MODEL="${kv#*=}" ;;
       effort)        PHASE_EFFORT="${kv#*=}" ;;
