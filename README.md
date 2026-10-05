@@ -56,6 +56,7 @@ docker-compose.yml        container definition (same-path repo mount, optional h
   state/runs.tsv          one row per agent run / gate / push: outcome, seconds, cost, turns
   state/reviews/          <phase>.md + .json verdicts (latest), <phase>.r<N>.* per round
   state/logs/             <phase>.build.log (+ .txt transcript), .fix.rN, .review.rN, .gate.rN
+  state/logs/driver.log   the runner's own account: one timestamped INFO/WARN/FAIL line per message, across runs
   state/SUMMARY.md · TOOLING.md · REVIEW.md
 ```
 
@@ -95,7 +96,8 @@ added (see [Pushing](#pushing)).
 | `phase-runner preflight` | Read-only tooling assessment of the whole plan → `.phase-runner/state/TOOLING.md`. |
 | `phase-runner review` | Read-only adversarial review of the finished project → `.phase-runner/state/REVIEW.md`. |
 | `phase-runner status` | Table of phases: status, last verdict, fix rounds, cost, minutes. No container. |
-| `phase-runner logs [PHASE] [-f]` | Readable transcript of the latest log, or the newest log matching PHASE. `-f` follows. |
+| `phase-runner logs [PHASE] [-f]` | Readable transcript of the latest agent or gate log, or the newest log matching PHASE. `-f` follows. |
+| `phase-runner logs driver [-f]` | The runner's own log (`state/logs/driver.log`): every start, retry, wait, verdict and stop, as plain text. `-f` follows. |
 | `phase-runner reset [--yes]` | Delete `.phase-runner/state`. Config, phases and the agent home stay. |
 
 All commands take `--project DIR` (default: the git repository containing the
@@ -421,11 +423,23 @@ committed.
 phase-runner status            # per phase: done/BLOCKED/partial/pending, verdict, rounds, $, min
 phase-runner logs -f           # live transcript of the newest log
 phase-runner logs A.md.review  # newest log whose name contains that
+phase-runner logs driver -f    # the runner's own log: what the terminal said, kept on disk
 cat .phase-runner/state/reviews/<phase>.md
 ```
 
 Logs are stream-json (`*.log`); a rendered transcript (`*.txt`) is written
 next to each when the role ends, and `logs` renders live with jq.
+
+The terminal is not the only record of a run. Everything the driver prints
+with `▶`, `⚠` or `✗` — phase starts, retries and why, usage-limit waits and
+until when, stall kills, red gates, verdicts, pushes, the reason it stopped —
+is also appended to `state/logs/driver.log` as one line per message: UTC
+timestamp, level (`INFO`, `WARN`, `FAIL`), message, no colour. Each start adds
+a header with the mode, branch, Claude Code version and pid, so consecutive
+runs can be told apart; the file survives everything except `phase-runner
+reset`. Writing it can never fail a run: an unwritable file is ignored.
+`phase-runner logs` without a phase keeps showing the latest agent or gate log,
+never this one.
 
 ## Preflight and final review
 
@@ -491,13 +505,14 @@ the auth and re-run — the backlog is pushed first. `PUSH=0` disables pushing.
 
 | Symptom | Cause / fix |
 |---|---|
+| The tmux scrollback is gone and you don't know what the run did or why it stopped | `phase-runner logs driver`: every line the driver printed, timestamped, across runs — retries, usage-limit waits, red gates, verdicts, the final `FAIL` line. The `Run stopped with …` rows below are all there. |
 | `no credentials file` | Create `~/.config/claude-phase-runner/credentials.env` from the template with exactly one of `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`. |
 | `no config at .phase-runner/runner.env` | Run `phase-runner init` in the project, or pass `--project DIR`. |
 | Phase BLOCKED after fix rounds | Read `state/reviews/<phase>.md`. Fix the plan or the code yourself, or raise `MAX_FIX_ROUNDS`, then re-run: the phase restarts from its prompt on the committed state. |
 | Builder reported blocked | Read `state/reviews/<phase>.blocked.md`; it names what it needs. Provide it (credentials, a decision, a package), re-run. |
 | `push failed 3 times` | No SSH agent forwarded / bad token in the remote URL. Fix, re-run — the backlog pushes first. |
 | Killed as stalled during a long docker build / test suite | Raise `STALL_TIMEOUT`. The retry resumes the same session, so little is lost. |
-| Builder reports "verification still running", "cut off" or "the turn was force-ended" | A Bash call outran its timeout and went to the background, where nothing wakes the agent up. With the defaults (`BACKGROUND_TASKS=0`, `BASH_TIMEOUT=600`, maximum `STALL_TIMEOUT` − 300) this cannot happen; if the project sets its own values, check the banner line `Bash tool: …`, raise `BASH_TIMEOUT_MAX` (and `STALL_TIMEOUT` with it) above the slowest command, and keep `BACKGROUND_TASKS=0`. |
+| Builder reports "verification still running", "cut off" or "the turn was force-ended" | A Bash call outran its timeout and went to the background, where nothing wakes the agent up. With the defaults (`BACKGROUND_TASKS=0`, `BASH_TIMEOUT=600`, maximum `STALL_TIMEOUT` − 300) this cannot happen; if the project sets its own values, check the banner line `Bash tool: …` (on the terminal or in `phase-runner logs driver`), raise `BASH_TIMEOUT_MAX` (and `STALL_TIMEOUT` with it) above the slowest command, and keep `BACKGROUND_TASKS=0`. |
 | Agent can't reach its own services on `127.0.0.1` | DooD: use `host.docker.internal:PORT`, or attach test containers to the app's compose network. |
 | `Cannot connect to the Docker daemon` in the transcript, or the builder reports blocked asking for `DOCKER_SOCKET=1` | The project runs with `DOCKER_SOCKET=0` (the template default). If its phases or gate really need containers, set `DOCKER_SOCKET=1` in `runner.env` and re-run. |
 | `refusing to start a container with the kit as the project` | The project directory is the kit itself, whose code is mounted live into the run. Run a frozen clone's `bin/phase-runner` with `--project` pointing here, see [Building the kit with the kit](#building-the-kit-with-the-kit). |
@@ -532,7 +547,11 @@ final review, the host CLI, the `DOCKER_SOCKET` switch (with a fake `docker`),
 the CLI refusing to build the kit itself, the Bash tool settings (defaults
 and explicit values as every role's process receives them, derived defaults
 from a small `STALL_TIMEOUT`, invalid values stopping the run before any
-agent, the banner line and the minutes stated in the prompts) — plus every
+agent, the banner line and the minutes stated in the prompts), the driver log
+(every terminal line of a run mirrored in order with timestamp and level, the
+`INFO`/`WARN`/`FAIL` lines of a retry, a red gate and a `die`, two runs
+appending under two headers, an unwritable file not failing the build, and
+`logs`, `logs driver` and `status` on the host) — plus every
 guard rule. The suite
 ignores the caller's environment: it re-executes itself once under `env -i`
 with only `PATH`, `HOME` and `TMPDIR`, so exported runner settings (inside a
