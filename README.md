@@ -274,7 +274,7 @@ All paths are relative to the project root. Phases are listed in
 | `FIX_CONTEXT` | `fresh` | `resume` continues the builder's session for fix rounds instead of a new context. |
 | `BUILD_BUDGET_USD`, `REVIEW_BUDGET_USD` | none | Hard spend cap per agent run. |
 | `RETRY_SCHEDULE` | `30 300 3600 10800` | Seconds before each retry after a transient failure. The list's length is the retry count. |
-| `LIMIT_WAIT_MAX` | `21600` | Longest wait for a subscription usage window to reset before the run gives up. |
+| `LIMIT_WAIT_MAX` | `21600` | Longest wait for a subscription usage window to reset. A rejected `rate_limit_event` whose reset is within this many seconds is waited out and the same session resumed; one further away stops the run at once, naming the reset time. |
 | `STALL_TIMEOUT` | `1800` | Kill + retry an agent that printed nothing for this long. Keep above your slowest silent step: a foreground Bash call prints nothing until it ends, so it also bounds `BASH_TIMEOUT_MAX` (the derived default is `STALL_TIMEOUT` − 300). |
 | `BASH_TIMEOUT` | `600`, capped at `BASH_TIMEOUT_MAX` | Seconds a Bash tool call may run when the agent passes no timeout (`BASH_DEFAULT_TIMEOUT_MS` to Claude Code, whose own default is 120). Must be a positive integer not above `BASH_TIMEOUT_MAX`. |
 | `BASH_TIMEOUT_MAX` | `STALL_TIMEOUT` − 300, never below `120` | The longest timeout an agent may ask for (`BASH_MAX_TIMEOUT_MS`); the prompts state it in minutes. Must be a positive integer below `STALL_TIMEOUT`, or the watchdog would kill a legitimately long command. |
@@ -369,10 +369,23 @@ Two failure shapes are treated as transient and retried on `RETRY_SCHEDULE`:
   refused/reset, timeouts, `fetch failed`, `socket hang up`.
 - **Hung** — no output for `STALL_TIMEOUT` seconds. The watchdog kills the
   process and stamps the log with `RUNNER-STALL`.
-- **Usage window** — a subscription's "You've hit your session limit · resets
-  3:20pm". The driver reads the reset time from the CLI's `rate_limit_event`,
-  waits for it (at most `LIMIT_WAIT_MAX`), and resumes the same session. Being
-  out of usage credits is not transient: the run stops with that hint.
+- **Usage window** — the CLI's rejected `rate_limit_event` names the window
+  (`five_hour`, `seven_day_overage_included`, …) and when it resets. Its
+  wording for the same window varies ("You've hit your session limit · resets
+  4:10pm", "You're out of usage credits · resets 8:40pm", "You're out of usage
+  credits. Switch to another model to continue."), so the event decides, not
+  the text. A reset within `LIMIT_WAIT_MAX` is waited out (plus a short grace)
+  and the same session resumed; a reset further away stops the run at once —
+  no sleeping towards a certain rejection — with the window, the reset time as
+  `YYYY-MM-DD HH:MM UTC`, the CLI's text and how to continue, in the output
+  and in `SUMMARY.md`; a reset that has already passed is a plain retry.
+  Without a rejected event the wording decides: "hit your … limit" / "usage
+  limit" is retried on the schedule, "out of usage credits", "insufficient
+  credits" or "credit balance" is an honest stop.
+
+Only what the failed attempt itself appended to the log is judged. Retries and
+re-runs append to one `<phase>.<role>.log`, so an event or an error text left
+by an earlier attempt or an earlier run never decides a later failure.
 
 Every run gets its own session id; a retry resumes exactly that session, so
 in-flight context is preserved and a false stall-kill is cheap. If the session
@@ -493,7 +506,8 @@ the auth and re-run — the backlog is pushed first. `PUSH=0` disables pushing.
 | Need python/go/rust in the image | `EXTRA_APT_PACKAGES="python3 python3-pip"` in `runner.env`; the image rebuilds on the next run. |
 | Reviewer verdicts feel shallow | Sharpen the phase's Definition of Done and set `REVIEW_MODEL`/`REVIEW_EFFORT` higher than the builder's. |
 | A phase costs far more than its size suggests | Read the transcript for repeated full test runs and big output dumps; lower that phase's `effort=` in `phases`, set `BASH_OUTPUT_MAX_CHARS`, see [Cost](#cost). |
-| Run stopped with `hit your session limit` | Older kits aborted here; now the driver waits for the reset (`LIMIT_WAIT_MAX`) and resumes. `out of usage credits` still stops the run — top up or switch to API billing. |
+| Run stopped with `usage limit: the … window resets at …` | The reset was further away than `LIMIT_WAIT_MAX`, so the driver stopped instead of sleeping. Re-run `phase-runner build` after the time it names — the run resumes where it stopped — or raise `LIMIT_WAIT_MAX` above the distance to have the runner wait. A reset within `LIMIT_WAIT_MAX` is waited out automatically, whatever the CLI's wording ("hit your session limit", "out of usage credits · resets …"). |
+| Run stopped with `out of usage credits — top up …` | The CLI sent no rejected `rate_limit_event` with a reset time, so there is nothing to wait for: top up, wait for the window yourself, or switch to API billing. |
 
 ## Iterating on the kit
 
@@ -505,8 +519,12 @@ changed).
 Tests need no Docker and no token: `bash tests/run.sh` runs a fake `claude`
 (`tests/bin/claude`) through every scenario — happy path, reviewer FAIL → fix
 → PASS, exhausted rounds, red gate, transient retry with session resume and
-once-counted cumulative cost, stall, no-session restart, usage-limit wait,
-out-of-credits stop, blocked builder, resume after an interruption (builder
+once-counted cumulative cost, stall, no-session restart, usage limits (the
+five-hour wait under either wording with the real event shape, the weekly
+stop with its message in the output and `SUMMARY.md` and the same window
+waited out under a raised `LIMIT_WAIT_MAX`, the no-event out-of-credits stop,
+a reset already passed, a stale rejection seeded in the log by an earlier run,
+an allowed event), blocked builder, resume after an interruption (builder
 skipped), per-phase manifest options, per-role model/effort, subagent model
 and output cap, `FIX_CONTEXT=resume` with fallback, dry run, two phases,
 committed verdicts, reviewer leaving files, uncommitted leftovers, preflight,
