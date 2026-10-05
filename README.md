@@ -578,7 +578,9 @@ Tests need no Docker and no token: `bash tests/run.sh` runs a fake `claude`
 once-counted cumulative cost, stall, no-session restart, usage limits (the
 five-hour wait under either wording with the real event shape, the weekly
 stop with its message in the output and `SUMMARY.md` and the same window
-waited out under a raised `LIMIT_WAIT_MAX`, the no-event out-of-credits stop,
+waited out under a raised `LIMIT_WAIT_MAX` — the fake's windows reset 8
+seconds ahead, `FAKE_LIMIT_RESET_IN` from a scenario, so a driver delayed by a
+few seconds still finds the reset ahead —, the no-event out-of-credits stop,
 a reset already passed, a stale rejection seeded in the log by an earlier run,
 an allowed event), blocked builder, resume after an interruption (builder
 skipped), per-phase manifest options, per-role model/effort, subagent model

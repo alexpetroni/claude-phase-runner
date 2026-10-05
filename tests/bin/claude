@@ -89,16 +89,19 @@ case "$role:$outcome" in
     fail_result 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
     exit 1 ;;
   # Usage limits, each with the result text the real CLI paired it with. The
-  # five-hour windows reset three seconds ahead (one second raced the driver's
-  # clock); the weekly one FAKE_LIMIT_RESET_IN seconds ahead, a day by default.
+  # window resets FAKE_LIMIT_RESET_IN seconds ahead: 8 by default for the
+  # five-hour windows, far enough that a driver delayed by several seconds
+  # between this exit and its classification still finds the reset ahead and
+  # waits, instead of taking the "reset already" branch (3 raced the clock);
+  # a day for the weekly one, which the scenarios about the honest stop use.
   build:limit|review:limit)
     say "starting"
-    rate_limit_event rejected five_hour $(( $(date +%s) + 3 ))
+    rate_limit_event rejected five_hour $(( $(date +%s) + ${FAKE_LIMIT_RESET_IN:-8} ))
     fail_result "You've hit your session limit · resets 4:10pm (UTC)"
     exit 1 ;;
   build:limitcredits)
     say "starting"
-    rate_limit_event rejected five_hour $(( $(date +%s) + 3 ))
+    rate_limit_event rejected five_hour $(( $(date +%s) + ${FAKE_LIMIT_RESET_IN:-8} ))
     fail_result "You're out of usage credits · resets 8:40pm (UTC)"
     exit 1 ;;
   build:weekly)

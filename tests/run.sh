@@ -479,7 +479,9 @@ unset t0 reset_at reset_str f
 
 scenario "the same weekly limit with LIMIT_WAIT_MAX above the distance → waited out, resumed"
 p="$(new_project weeklywait)"
-FAKE_LIMIT_RESET_IN=3 LIMIT_WAIT_MAX=30 LIMIT_WAIT_GRACE=0 run_driver "$p" build:weekly build:ok review:PASS
+# 8 seconds ahead like the fake's five-hour windows: enough margin that a slow
+# driver still finds the reset ahead and takes the waiting branch.
+FAKE_LIMIT_RESET_IN=8 LIMIT_WAIT_MAX=30 LIMIT_WAIT_GRACE=0 run_driver "$p" build:weekly build:ok review:PASS
 assert_eq "$RC" 0 "rc"
 assert_eq "$(invocations)" 3 "invocations"
 assert_grep 'Usage limit reached .*the seven_day_overage_included window resets at' "$OUT"
