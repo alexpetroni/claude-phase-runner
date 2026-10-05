@@ -801,7 +801,7 @@ self_run() {  # self_run ARG... → RC, OUT, FAKE_DOCKER
   RC=$?
 }
 for cmd in "build" "build --dry-run" "dry-run" "preflight" "review"; do
-  # shellcheck disable=SC2086
+  # shellcheck disable=SC2086  # unquoted on purpose: "build --dry-run" must split into two arguments
   self_run $cmd
   assert_eq "$RC" 1 "rc ($cmd)"
   assert_grep 'refusing to start a container with the kit as the project' "$OUT"

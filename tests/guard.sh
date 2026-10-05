@@ -57,7 +57,7 @@ for r in build review; do
   block $r "$(bash_call 'echo $(ssh host hostname)')"                       "$r: ssh inside \$( )"
   block $r "$(bash_call 'env FOO=1 ssh host')"                              "$r: ssh after env VAR=…"
   block $r "$(bash_call 'ssh-add -l')"                                      "$r: ssh-add -l"
-  # shellcheck disable=SC2016
+  # shellcheck disable=SC2016  # the single-quoted text IS the command under test
   block $r "$(bash_call 'eval $(ssh-agent -s)')"                            "$r: ssh-agent"
   block $r "$(bash_call 'SSH_AUTH_SOCK=/ssh-agent git fetch')"              "$r: SSH_AUTH_SOCK= prefix"
   block $r "$(bash_call 'ls -l /ssh-agent')"                                "$r: the socket path"
