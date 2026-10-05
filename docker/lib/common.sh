@@ -12,10 +12,22 @@ RUNNER_HOME="${PHASE_RUNNER_HOME:-/opt/phase-runner}"
 PROMPTS_DIR="$RUNNER_HOME/prompts"
 LIB_DIR="$RUNNER_HOME/docker/lib"
 
-log()  { printf '\n\033[1;34m▶ %s\033[0m\n' "$*"; }
-warn() { printf '\033[1;33m⚠ %s\033[0m\n' "$*" >&2; }
+# The runner's own account of a run: every log/warn/die message also goes to
+# state/logs/driver.log as one line — UTC timestamp, level, message with
+# newlines folded, no colour — appended across runs, so a tmux scrollback is
+# not the only record of a retry, a usage-limit wait or why a run stopped.
+# Writing can fail (a read-only file, a full disk, a directory in its place)
+# and must never change the driver's exit status, hence the swallowed error.
+driver_log() {  # driver_log LEVEL MESSAGE
+  local msg="${2//$'\n'/ }"
+  [[ -n "${LOGS:-}" ]] || return 0
+  { printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$1" "$msg" >> "$LOGS/driver.log"; } 2>/dev/null || true
+}
+log()  { printf '\n\033[1;34m▶ %s\033[0m\n' "$*"; driver_log INFO "$*"; }
+warn() { printf '\033[1;33m⚠ %s\033[0m\n' "$*" >&2; driver_log WARN "$*"; }
 die()  {
   printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2
+  driver_log FAIL "$*"
   write_summary "FAILED" "$*"
   exit 1
 }

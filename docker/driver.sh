@@ -39,6 +39,9 @@ read -r -a PHASES <<< "${PHASE_FILES:?PHASE_FILES is not set (ordered phase plan
 ENTRY_FILE="${ENTRY_FILE:?ENTRY_FILE is not set (the entry/constitution prompt file)}"
 GIT_REMOTE="${GIT_REMOTE:-origin}"
 GIT_BRANCH="${GIT_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
+# One header per start in state/logs/driver.log, so consecutive runs can be
+# told apart in a file that is appended to across runs (not on the terminal).
+driver_log INFO "=== driver start: mode $MODE, branch $GIT_BRANCH, Claude Code $(claude --version 2>/dev/null | head -1), pid $$"
 PUSH="${PUSH:-1}"
 GATE_CMD="${GATE_CMD:-}"
 GATE_TIMEOUT="${GATE_TIMEOUT:-3600}"   # seconds; the gate is not an agent, so the stall watchdog does not cover it

@@ -141,6 +141,7 @@ assert_eq "$(invocations)" 6 "invocations"
 assert_grep 'BLOCKED' "$OUT"
 assert_grep 'FAILED' "$STATE/SUMMARY.md"
 assert_grep 'Blocked:' "$STATE/SUMMARY.md"
+assert_grep '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z FAIL phase plan/A.md BLOCKED' "$STATE/logs/driver.log"   # die → FAIL line
 
 scenario "gate red → fix → gate green → review PASS"
 p="$(new_project gate)"
@@ -153,6 +154,7 @@ assert_file "$STATE/logs/A.md.gate.r0.log"
 assert_file "$STATE/logs/A.md.gate.r1.log"
 assert_grep $'\tgate\t0\tred\t' "$STATE/runs.tsv"
 assert_grep $'\tgate\t1\tgreen\t' "$STATE/runs.tsv"
+assert_grep '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z WARN Gate RED \(rc=' "$STATE/logs/driver.log"   # warn → WARN line
 
 scenario "gate never waits on stdin and is killed by GATE_TIMEOUT"
 p="$(new_project gatestdin)"
@@ -180,6 +182,7 @@ assert_eq "$(invocations)" 3 "invocations"
 assert_eq "$(arg_after 2 --resume)" "$(arg_after 1 --session-id)" "resume uses the first session id"
 assert_grep 'interrupted' "$FAKE/2.prompt"
 assert_grep 'Transient API failure' "$OUT"
+assert_grep '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z INFO Transient API failure \(build, attempt 1/' "$STATE/logs/driver.log"   # the retry is on record
 assert_grep $'\tbuild\t0\tdone\t[0-9]*\t0.8\t5\t' "$STATE/runs.tsv"   # resumed session: last result per session, not a sum (0.3 + 0.8)
 
 scenario "stall → watchdog kill → retry"
@@ -641,6 +644,43 @@ RUNNER_MODE=review run_driver "$p" final-review:ok
 assert_eq "$RC" 0 "rc"
 assert_grep 'MARKER-REPORT' "$STATE/REVIEW.md"
 assert_grep 'FINAL ADVERSARIAL REVIEW' "$FAKE/1.prompt"
+
+# ── driver.log: the runner's own account of a run ─────────────────────────
+TS='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
+ESC=$'\033'
+scenario "driver.log: every log line of a run, timestamped, levelled, in order, no colour"
+p="$(new_project driverlog)"
+run_driver "$p" build:ok review:PASS
+assert_eq "$RC" 0 "rc"
+DRV="$STATE/logs/driver.log"
+assert_file "$DRV"
+assert_grep "$TS INFO === driver start: mode build, branch main, Claude Code 0\.0\.0 \(fake\), pid [0-9]+$" "$DRV"
+assert_eq "$(grep -cE "$TS (INFO|WARN|FAIL) " "$DRV")" "$(wc -l < "$DRV")" "every line starts with a UTC timestamp and a level"
+assert_not_grep "$ESC" "$DRV"
+# the INFO lines after the header are exactly the terminal's ▶ lines, in order
+assert_eq "$(grep -E "$TS INFO " "$DRV" | tail -n +2 | cut -d' ' -f3-)" \
+          "$(sed -n "s/^${ESC}\[1;34m▶ \(.*\)${ESC}\[0m\$/\1/p" "$OUT")" "INFO lines mirror the terminal"
+assert_grep "$TS INFO All phases complete$" "$DRV"
+# a second run in the same project appends: two headers, both runs' messages
+run_driver "$p" build:ok review:PASS
+assert_eq "$RC" 0 "rc (second run)"
+assert_eq "$(invocations)" 0 "second run: nothing left to build"
+assert_eq "$(grep -c '=== driver start:' "$DRV")" 2 "two header lines"
+assert_eq "$(grep -c 'All phases complete$' "$DRV")" 2 "both runs' last message"
+assert_grep 'Phase plan/A.md: already completed in a previous run' "$DRV"
+assert_grep "$TS INFO Phases: plan/A.md$" "$DRV"
+assert_eq "$(grep -cE "$TS (INFO|WARN|FAIL) " "$DRV")" "$(wc -l < "$DRV")" "every line still well-formed"
+
+scenario "driver.log impossible to write → the build still completes"
+p="$(new_project driverlog-ro)"
+mkdir -p "$p/.phase-runner/state/logs/driver.log"   # a directory in its place defeats root too
+run_driver "$p" build:ok review:PASS
+assert_eq "$RC" 0 "rc"
+assert_grep '^plan/A.md$' "$STATE/phases-done"
+assert_grep 'All phases complete' "$OUT"
+assert_not_grep 'Is a directory' "$OUT"
+[[ -d "$STATE/logs/driver.log" ]] && ok || bad "the directory was replaced"
+assert_grep 'SUCCESS' "$STATE/SUMMARY.md"
 
 scenario "host CLI: init, status, logs (no docker)"
 p="$(new_project cli)"
