@@ -840,6 +840,39 @@ RUNNER_MODE=dry-run run_driver "$p"
 assert_grep 'a && b' "$OUT"
 assert_grep 'costs \$5 & more' "$OUT"
 
+# ── Lint ─────────────────────────────────────────────────────────────────────
+scenario "lint: shellcheck -x -S warning over every kit script (one SKIP line when shellcheck is absent)"
+lint_files() {  # lint_files → LINT_FILES, kit-relative, from the directories: a new script is covered unedited
+  local f; LINT_FILES=()
+  for f in "$KIT"/bin/* "$KIT"/docker/*.sh "$KIT"/docker/lib/*.sh "$KIT"/tests/*.sh "$KIT"/tests/bin/*; do
+    [[ -f "$f" ]] && LINT_FILES+=("${f#"$KIT"/}")
+  done
+}
+lint_kit() {  # lint_kit → rc 0 and one SKIP line without shellcheck; otherwise shellcheck's findings and rc
+  command -v shellcheck >/dev/null 2>&1 \
+    || { echo "  SKIP: shellcheck not on PATH — the lint scenario did not run"; return 0; }
+  lint_files
+  (cd "$KIT" && shellcheck -x -S warning "${LINT_FILES[@]}")
+}
+lint_files
+for f in bin/phase-runner docker/driver.sh docker/guard.sh docker/lib/claude.sh tests/run.sh tests/guard.sh tests/smoke.sh tests/bin/claude; do
+  printf '%s\n' "${LINT_FILES[@]}" | grep -qx "$f" && ok || bad "$f missing from the lint list"
+done
+if command -v shellcheck >/dev/null 2>&1; then
+  lint_out="$(lint_kit 2>&1)"; rc=$?
+  if (( rc == 0 )); then ok; else bad "shellcheck -x -S warning over ${#LINT_FILES[@]} scripts:"$'\n'"$lint_out"; fi
+else
+  lint_kit
+fi
+# The skip path, whatever this machine has: with shellcheck hidden from PATH
+# the scenario prints exactly one SKIP line and passes.
+mkdir -p "$TMP/no-shellcheck"
+lint_out="$(PATH="$TMP/no-shellcheck" lint_kit 2>&1)"; rc=$?
+assert_eq "$rc" 0 "rc without shellcheck"
+assert_eq "$(grep -c 'SKIP: shellcheck not on PATH' <<<"$lint_out")" 1 "one SKIP line without shellcheck"
+assert_eq "$(wc -l <<<"$lint_out")" 1 "nothing but the SKIP line without shellcheck"
+unset f lint_out
+
 # ── Guard hook ───────────────────────────────────────────────────────────────
 scenario "guard hook"
 # ── The SSH agent is the runner's push credential, never the agent's ─────────
