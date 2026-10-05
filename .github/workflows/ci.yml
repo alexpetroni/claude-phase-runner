@@ -1,0 +1,27 @@
+# The kit checks itself on every push and pull request. Neither job needs a
+# token or a secret: `test` drives the fake `claude` through every scenario
+# (plus lint and the guard rules); `smoke` builds the real image and runs the
+# real CLI in dry-run mode against a throwaway project, with no API call.
+# Actions are pinned to released tags, verified upstream (see README,
+# "Iterating on the kit").
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install jq and shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq shellcheck
+      - name: Driver, CLI, lint and guard scenarios
+        run: bash tests/run.sh
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: The real container in dry-run mode, once per DOCKER_SOCKET value
+        run: bash tests/smoke.sh
