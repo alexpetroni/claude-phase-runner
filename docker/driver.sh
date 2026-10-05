@@ -398,7 +398,7 @@ check_push_access() {
   if GIT_TERMINAL_PROMPT=0 timeout --kill-after=10 30 git ls-remote "$GIT_REMOTE" HEAD >>"$LOGS/push.log" 2>&1 </dev/null; then
     log "Push remote $GIT_REMOTE ($url) is reachable"
   else
-    warn "Push remote $GIT_REMOTE ($url) is NOT reachable (logs/push.log) — pushing will fail. Usual causes: no SSH agent forwarded (eval \$(ssh-agent); ssh-add on the host) or a bad token in an HTTPS remote URL. The run continues: work is committed locally and the next run pushes the backlog."
+    warn "Push remote $GIT_REMOTE ($url) is NOT reachable (logs/push.log) — pushing will fail. Usual causes: no SSH agent forwarded or a bad token in an HTTPS remote URL. For SSH, first run \`ssh-add -l\` in the terminal that launches the run: a desktop keyring usually provides an agent already, and a newly started agent is empty and replaces the keyring's agent for that terminal, so start one (eval \$(ssh-agent); ssh-add) only when there is none at all. The run continues: work is committed locally and the next run pushes the backlog."
   fi
 }
 

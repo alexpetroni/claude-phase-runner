@@ -781,6 +781,23 @@ assert_grep '^image inspect x:y$' "$FAKE_DOCKER/calls"
 assert_not_grep 'claude-phase-runner:latest' "$FAKE_DOCKER/calls"
 assert_grep '^ +image: \$\{RUNNER_IMAGE:-claude-phase-runner:latest\}$' "$KIT/docker-compose.yml"
 
+scenario "host CLI: an SSH push remote with no agent → a warning that checks ssh-add -l before starting one (fake docker)"
+# `build` itself, not --dry-run: the warning is for a run that will push.
+git -C "$p" remote add origin git@github.com:o/r.git
+printf '%s\n' 'ENTRY_FILE=plan/ENTRY.md' 'PUSH=1' 'DOCKER_SOCKET=0' > "$p/.phase-runner/runner.env"
+OUT="$TMP/out-$RANDOM$RANDOM.log"
+env -u DOCKER_SOCKET PATH="$TMP/fakedocker:$PATH" FAKE_DOCKER="$FAKE_DOCKER" \
+  PHASE_RUNNER_CREDENTIALS="$TMP/creds.env" \
+  bash "$KIT/bin/phase-runner" --project "$p" build >"$OUT" 2>&1 </dev/null
+RC=$?
+assert_eq "$RC" 0 "rc"
+assert_grep 'No SSH agent \(SSH_AUTH_SOCK unset\) but the push remote is SSH: git@github.com:o/r.git' "$OUT"
+# The advice cannot break a working agent: the ssh-add -l check and the
+# empty-agent warning come before the instruction to start one.
+assert_grep "First run 'ssh-add -l' in this terminal.*newly started agent is empty and replaces the keyring's agent.*start one \(eval \\\$\(ssh-agent\); ssh-add\) only when there is none at all" "$OUT"
+assert_grep '^compose .* run ' "$FAKE_DOCKER/calls"
+git -C "$p" remote remove origin
+
 scenario "host CLI: the kit refuses to build itself; init/status/logs/reset still work there (fake docker)"
 # A copy of the kit that is also the project: its own bin/phase-runner is run
 # with --project pointing at the copy (via a symlink, to prove the comparison
@@ -922,6 +939,9 @@ assert_eq "$RC" 0 "rc"
 assert_grep 'Push remote origin \(.*no-such-remote.git\) is NOT reachable' "$OUT"
 assert_grep 'no SSH agent forwarded' "$OUT"
 assert_grep 'bad token in an HTTPS remote URL' "$OUT"
+# The advice cannot break a working agent: the ssh-add -l check and the
+# empty-agent warning come before the instruction to start one.
+assert_grep 'first run `ssh-add -l` in the terminal that launches the run.*newly started agent is empty and replaces the keyring.s agent.*start one \(eval \$\(ssh-agent\); ssh-add\) only when there is none at all' "$OUT"
 assert_grep 'MARKER-REPORT' "$STATE/TOOLING.md"
 assert_not_grep 'Pushed|Push failed' "$OUT"
 assert_not_grep $'\tpush\t' "$STATE/runs.tsv"

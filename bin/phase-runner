@@ -178,8 +178,8 @@ cmd_run() {  # cmd_run MODE
     local remote_url
     remote_url="$(git -C "$PROJECT_DIR" remote get-url "${GIT_REMOTE:-origin}" 2>/dev/null || true)"
     if [[ "$remote_url" == git@* || "$remote_url" == ssh://* ]]; then
-      warn "No SSH agent (SSH_AUTH_SOCK unset) but the push remote is SSH: $remote_url"
-      warn "Start one (eval \$(ssh-agent); ssh-add) or the per-phase push will fail."
+      warn "No SSH agent (SSH_AUTH_SOCK unset) but the push remote is SSH: $remote_url — the per-phase push will fail."
+      warn "First run 'ssh-add -l' in this terminal: a desktop keyring usually provides an agent already (point the terminal at it). A newly started agent is empty and replaces the keyring's agent for this terminal, so start one (eval \$(ssh-agent); ssh-add) only when there is none at all."
     fi
   fi
 

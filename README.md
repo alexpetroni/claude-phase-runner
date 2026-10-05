@@ -474,10 +474,13 @@ tools, guard hook); the agent returns the report and the driver writes it.
 The runner pushes after every verified phase (and after a blocked one, so the
 work is never only local). The agent itself cannot push — the guard blocks it.
 
-- **SSH remote**: start an agent and add your key before launching
-  (`eval $(ssh-agent); ssh-add`); the socket is forwarded into the container
-  and host keys are accepted automatically. The CLI warns if the remote is SSH
-  and no agent is running.
+- **SSH remote**: the agent of the terminal that launches the run is
+  forwarded into the container, and host keys are accepted automatically.
+  First check that it holds your key: `ssh-add -l` in that terminal. A
+  desktop keyring usually provides an agent already, and a newly started
+  agent is empty and replaces the keyring's agent for that terminal, so start
+  one (`eval $(ssh-agent); ssh-add`) only when `ssh-add -l` finds no agent
+  at all. The CLI warns if the remote is SSH and no agent is running.
 - **HTTPS remote with embedded token**
   (`https://x-access-token:<TOKEN>@github.com/you/repo.git`): needs nothing.
 
@@ -546,7 +549,7 @@ the auth and re-run — the backlog is pushed first. `PUSH=0` disables pushing
 | `no config at .phase-runner/runner.env` | Run `phase-runner init` in the project, or pass `--project DIR`. |
 | Phase BLOCKED after fix rounds | Read `state/reviews/<phase>.md`. Fix the plan or the code yourself, or raise `MAX_FIX_ROUNDS`, then re-run: the phase restarts from its prompt on the committed state. |
 | Builder reported blocked | Read `state/reviews/<phase>.blocked.md`; it names what it needs. Provide it (credentials, a decision, a package), re-run. |
-| `push failed 3 times` | No SSH agent forwarded / bad token in the remote URL. Fix, re-run — the backlog pushes first. With `PUSH=1` the driver checks the remote before the first agent (`Push remote … is NOT reachable` warning in the first minute, details in `logs/push.log`), so this is usually visible at the start of the run. |
+| `push failed 3 times` | No SSH agent forwarded (`ssh-add -l` in the launching terminal must list the key; a new agent is empty and replaces the keyring's agent for that terminal, so `eval $(ssh-agent); ssh-add` only when there is none at all) / bad token in the remote URL. Fix, re-run — the backlog pushes first. With `PUSH=1` the driver checks the remote before the first agent (`Push remote … is NOT reachable` warning in the first minute, details in `logs/push.log`), so this is usually visible at the start of the run. |
 | Killed as stalled during a long docker build / test suite | Raise `STALL_TIMEOUT`. The retry resumes the same session, so little is lost. |
 | Builder reports "verification still running", "cut off" or "the turn was force-ended" | A Bash call outran its timeout and went to the background, where nothing wakes the agent up. With the defaults (`BACKGROUND_TASKS=0`, `BASH_TIMEOUT=600`, maximum `STALL_TIMEOUT` − 300) this cannot happen; if the project sets its own values, check the banner line `Bash tool: …` (on the terminal or in `phase-runner logs driver`), raise `BASH_TIMEOUT_MAX` (and `STALL_TIMEOUT` with it) above the slowest command, and keep `BACKGROUND_TASKS=0`. |
 | Agent can't reach its own services on `127.0.0.1` | DooD: use `host.docker.internal:PORT`, or attach test containers to the app's compose network. |
@@ -592,7 +595,9 @@ appending under two headers, an unwritable file not failing the build, and
 process and the gate without `SSH_AUTH_SOCK` while a `pre-push` hook sees the
 driver's value and the push to a bare remote succeeds; the early push-access
 check: one line for a reachable remote, a warning naming an unreachable one
-in `preflight` with no push attempted, a remote that needs credentials —
+in `preflight` with no push attempted whose advice checks `ssh-add -l` and
+warns about an empty agent before saying how to start one — as the CLI's
+warning for an SSH remote without an agent does —, a remote that needs credentials —
 `tests/bin/git-remote-needsauth`, a helper that asks git for credentials like
 `git-remote-https` on a 401 — failing at once with git's `terminal prompts
 disabled` error in `logs/push.log`, nothing contacted with `PUSH=0`) — plus every
