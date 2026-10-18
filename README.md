@@ -42,7 +42,8 @@ docker/driver.sh          the phase loop: builder → gate → reviewer → fix 
 docker/lib/               claude.sh (roles, retries, watchdog) · git.sh · common.sh · renderers
 docker/guard.sh           the enforcement hook (per-role rules, tested)
 prompts/*.md              builder, fix (fresh or resumed), reviewer, preflight, final-review instructions, the rules and no-Docker notes — edit freely
-templates/                runner.env, phases, credentials.env starting points
+templates/                runner.env, phases, credentials.env starting points; ENTRY.md and PHASE.md skeletons for the plan
+docs/WRITING-PHASES.md    how to write the plan: cutting phases, the entry file, the Definition of Done, the manifest
 tests/                    bash tests/run.sh — driver, CLI, lint and guard tests with a fake `claude`; smoke.sh — the real container, dry run, no API call
 .github/workflows/ci.yml  both on every push and pull request: run.sh (job `test`) and smoke.sh (job `smoke`)
 docker-compose.yml        container definition (same-path repo mount, optional host Docker socket, agent home)
@@ -73,6 +74,8 @@ cp templates/credentials.env ~/.config/claude-phase-runner/credentials.env   # t
 cd ~/work/my-project
 phase-runner init                    # creates .phase-runner/{runner.env,phases}
 $EDITOR .phase-runner/runner.env     # ENTRY_FILE, GATE_CMD, models, push
+# write the plan — docs/WRITING-PHASES.md; start from templates/ENTRY.md and templates/PHASE.md
+$EDITOR docs/ENTRY.md docs/phases/PHASE-0-SCAFFOLD.md   # the entry file and one file per phase; commit them
 $EDITOR .phase-runner/phases         # the plan files, one per line
 phase-runner build --dry-run         # prints the exact first builder prompt, launches nothing
 phase-runner preflight               # optional: what tooling/credentials the plan needs
@@ -304,6 +307,12 @@ secret store, deliberately outside the project, so the agent can manage the
 project's `.env` files without ever seeing its token.
 
 ### The entry file and the phase files
+
+How to write them — cutting a project into phases, what belongs in the entry
+file, what makes a Definition of Done checkable, the manifest, the checks
+before the first run — is in [docs/WRITING-PHASES.md](docs/WRITING-PHASES.md);
+`templates/ENTRY.md` and `templates/PHASE.md` are skeletons to start from. In
+short:
 
 **The entry file** is read first and prepended to every prompt. Put in it: the
 mission and what "done" means for the product; the binding engineering rules
@@ -565,7 +574,7 @@ the auth and re-run — the backlog is pushed first. `PUSH=0` disables pushing
 | `guard … BLOCKED` lines in the transcript | Working as intended. If a legitimate command is caught, add a narrower rule + a test case in `tests/guard.sh`. |
 | A completed phase runs again | Its manifest path changed, or the state was reset. |
 | Need python/go/rust in the image | `EXTRA_APT_PACKAGES="python3 python3-pip"` in `runner.env`; the image rebuilds on the next run. |
-| Reviewer verdicts feel shallow | Sharpen the phase's Definition of Done and set `REVIEW_MODEL`/`REVIEW_EFFORT` higher than the builder's. |
+| Reviewer verdicts feel shallow | Sharpen the phase's Definition of Done (see [docs/WRITING-PHASES.md](docs/WRITING-PHASES.md)) and set `REVIEW_MODEL`/`REVIEW_EFFORT` higher than the builder's. |
 | A phase costs far more than its size suggests | Read the transcript for repeated full test runs and big output dumps; lower that phase's `effort=` in `phases`, set `BASH_OUTPUT_MAX_CHARS`, see [Cost](#cost). |
 | Run stopped with `usage limit: the … window resets at …` | The reset was further away than `LIMIT_WAIT_MAX`, so the driver stopped instead of sleeping. Re-run `phase-runner build` after the time it names — the run resumes where it stopped — or raise `LIMIT_WAIT_MAX` above the distance to have the runner wait. A reset within `LIMIT_WAIT_MAX` is waited out automatically, whatever the CLI's wording ("hit your session limit", "out of usage credits · resets …"). |
 | Run stopped with `out of usage credits — top up …` | The CLI sent no rejected `rate_limit_event` with a reset time, so there is nothing to wait for: top up, wait for the window yourself, or switch to API billing. |

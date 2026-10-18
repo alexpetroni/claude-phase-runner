@@ -46,7 +46,7 @@ happens in a phase, retries, resume, the guard, the security model. Then the cod
 | `docker/lib/common.sh`, `docker/lib/git.sh` | Logging, prompt rendering, `runs.tsv`, `SUMMARY.md`; checkpoint commits, tree snapshot/restore, push. |
 | `docker/guard.sh` | The `PreToolUse` hook that enforces the rules for every role. |
 | `prompts/*.md` | The instructions each role receives. They are product: wording matters. |
-| `templates/` | `runner.env`, `phases`, `credentials.env` starting points for a new project. |
+| `templates/` | `runner.env`, `phases`, `credentials.env` starting points for a new project; `ENTRY.md` and `PHASE.md` skeletons for its plan (`docs/WRITING-PHASES.md` explains them). |
 | `tests/run.sh`, `tests/guard.sh`, `tests/bin/claude` | The suite: driver and CLI scenarios driven by a fake `claude`, plus one case per guard rule. |
 
 ## What "done" means for this batch

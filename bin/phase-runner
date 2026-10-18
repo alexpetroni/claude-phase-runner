@@ -137,12 +137,15 @@ cmd_init() {
 
 Next:
   1. Edit .phase-runner/runner.env   — ENTRY_FILE, GATE_CMD, models, push settings
-  2. Edit .phase-runner/phases       — the phase plan files, one per line, in order
-  3. Credentials once per machine    — ~/.config/claude-phase-runner/credentials.env
+  2. Write the plan                  — the entry file and one file per phase, committed
+                                       (how: $KIT_DIR/docs/WRITING-PHASES.md;
+                                        skeletons: $KIT_DIR/templates/ENTRY.md, PHASE.md)
+  3. Edit .phase-runner/phases       — the phase plan files, one per line, in order
+  4. Credentials once per machine    — ~/.config/claude-phase-runner/credentials.env
                                        (template: $KIT_DIR/templates/credentials.env)
-  4. phase-runner build --dry-run    — prints the exact first builder prompt, launches nothing
-  5. phase-runner preflight          — optional: what tooling/credentials the plan needs
-  6. phase-runner build              — run it (use tmux; Ctrl-C is safe at any time)
+  5. phase-runner build --dry-run    — prints the exact first builder prompt, launches nothing
+  6. phase-runner preflight          — optional: what tooling/credentials the plan needs
+  7. phase-runner build              — run it (use tmux; Ctrl-C is safe at any time)
 EOF
 }
 
