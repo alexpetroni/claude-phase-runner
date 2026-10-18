@@ -1,7 +1,5 @@
-# Nothing per-project or secret belongs in the kit any more:
-#   config + state  → <project>/.phase-runner/   (excluded via the project's .git/info/exclude)
-#   credentials     → ~/.config/claude-phase-runner/credentials.env
-# These patterns only keep legacy files from the old layout out of history.
+# Nothing per-project or secret belongs in the kit: config and state live in
+# <project>/.phase-runner/, credentials in ~/.config/claude-phase-runner/.
+# The kit does not read a credentials.env here; this keeps a token dropped in
+# by mistake out of history.
 /credentials.env
-/runner*.env
-/state*/

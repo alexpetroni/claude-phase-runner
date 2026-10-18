@@ -91,10 +91,8 @@ load_config() {
   set +a
   [[ -n "${ENTRY_FILE:-}" ]] || die "ENTRY_FILE is not set in $(rel "$CONFIG")"
   [[ -f "$PROJECT_DIR/$ENTRY_FILE" ]] || die "entry file not found: $ENTRY_FILE (relative to $PROJECT_DIR)"
-  if [[ -z "${PHASE_FILES:-}" ]]; then
-    PHASE_FILES="$(read_manifest "$PR_DIR/phases")"
-    [[ -n "$PHASE_FILES" ]] || die "no phases: list them in $(rel "$PR_DIR/phases") (one per line, in order)"
-  fi
+  PHASE_FILES="$(read_manifest "$PR_DIR/phases")"
+  [[ -n "$PHASE_FILES" ]] || die "no phases: list them in $(rel "$PR_DIR/phases") (one per line, in order)"
   local p
   for p in $PHASE_FILES; do
     [[ -f "$PROJECT_DIR/$p" ]] || die "phase file not found: $p (relative to $PROJECT_DIR)"
@@ -107,13 +105,10 @@ rel() { printf '%s' "${1#"$PROJECT_DIR"/}"; }
 resolve_credentials() {
   local c
   for c in "${PHASE_RUNNER_CREDENTIALS:-}" \
-           "${XDG_CONFIG_HOME:-$HOME/.config}/claude-phase-runner/credentials.env" \
-           "$KIT_DIR/credentials.env"; do
+           "${XDG_CONFIG_HOME:-$HOME/.config}/claude-phase-runner/credentials.env"; do
     [[ -n "$c" && -f "$c" ]] && { CREDENTIALS_FILE="$c"; break; }
   done
   [[ -n "${CREDENTIALS_FILE:-}" ]] || die "no credentials file. Create ~/.config/claude-phase-runner/credentials.env from $KIT_DIR/templates/credentials.env"
-  [[ "$CREDENTIALS_FILE" == "$KIT_DIR/credentials.env" ]] \
-    && warn "using $CREDENTIALS_FILE (legacy location) — move it to ~/.config/claude-phase-runner/credentials.env"
   grep -qE '^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)=.+' "$CREDENTIALS_FILE" \
     || die "$CREDENTIALS_FILE sets neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY"
   export CREDENTIALS_FILE
@@ -230,9 +225,6 @@ cmd_status() {
   [[ -f "$PR_DIR/runner.env" ]] || die "no .phase-runner/runner.env — run 'phase-runner init'"
   local phases
   phases="$(read_manifest "$PR_DIR/phases")"
-  if [[ -z "$phases" ]]; then
-    phases="$( (set -a; source "$PR_DIR/runner.env" 2>/dev/null; printf '%s' "${PHASE_FILES:-}") )"
-  fi
   [[ -n "$phases" ]] || die "no phases listed in $(rel "$PR_DIR/phases")"
   local done_f="$STATE/phases-done" blocked_f="$STATE/blocked" runs="$STATE/runs.tsv"
   local p status verdict rounds cost min
@@ -310,7 +302,7 @@ cmd_reset() {
 
 case "$CMD" in
   init)      cmd_init ;;
-  build)     if has_arg --dry-run || [[ -n "${DRY_RUN:-}" ]]; then cmd_run dry-run; else cmd_run build; fi ;;
+  build)     if has_arg --dry-run; then cmd_run dry-run; else cmd_run build; fi ;;
   dry-run)   cmd_run dry-run ;;
   preflight) cmd_run preflight ;;
   review)    cmd_run review ;;

@@ -265,8 +265,7 @@ resumed runs by up to 2×).
 ## Configuration — `.phase-runner/runner.env`
 
 All paths are relative to the project root. Phases are listed in
-`.phase-runner/phases` (one per line, `#` comments; `PHASE_FILES` in
-`runner.env` still works as a space-separated fallback).
+`.phase-runner/phases` (one per line, `#` comments).
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -301,8 +300,7 @@ All paths are relative to the project root. Phases are listed in
 | `GUARD` | `1` | `0` disables the enforcement hook. Not recommended. |
 
 Credentials are resolved from `$PHASE_RUNNER_CREDENTIALS`, then
-`~/.config/claude-phase-runner/credentials.env`, then (with a warning) a
-legacy `credentials.env` in the kit directory. They are the agent's own
+`~/.config/claude-phase-runner/credentials.env`. They are the agent's own
 secret store, deliberately outside the project, so the agent can manage the
 project's `.env` files without ever seeing its token.
 
@@ -699,17 +697,3 @@ git clone /path/to/claude-phase-runner /tmp/phase-runner-frozen
 The clone is what runs; the checkout under `--project` is what gets edited,
 committed and pushed. Re-clone (or `git pull` in the clone) when you want the
 runner to pick up kit changes.
-
-## Migrating from the old layout (kit-local `runner.env` + `state/`)
-
-1. In each target project: `phase-runner init`, then move the old
-   `runner.env` values into `.phase-runner/runner.env` (drop `PROJECT_DIR`;
-   `PHASE_FILES` still works, but the `phases` manifest is nicer) and the phase
-   list into `.phase-runner/phases`.
-2. Move that project's `state/` contents into `.phase-runner/state/`
-   (`phases-done`, `logs/`, `SUMMARY.md`, …). Old per-project state that was
-   mixed in one kit `state/` directory must be split by project — the
-   `phases-done` paths tell you which is which.
-3. Move `credentials.env` to `~/.config/claude-phase-runner/credentials.env`.
-4. Remove the "spawn a verification subagent" instructions from your entry
-   files; the runner's reviewer replaces them.

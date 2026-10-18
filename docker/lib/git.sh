@@ -20,8 +20,6 @@ checkpoint_commit() {  # checkpoint_commit MESSAGE
   fi
 }
 
-tree_is_clean() { [[ -z "$(git status --porcelain)" ]]; }
-
 tree_status() { git status --porcelain --untracked-files=all | LC_ALL=C sort; }
 
 # Read-only roles must leave the tree as they found it. The tree is not
