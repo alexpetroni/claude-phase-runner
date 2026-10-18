@@ -216,15 +216,19 @@ Fable 5.1 at xhigh, 1-hour prompt cache):
 
 **The levers, in order of impact — all configurable, see the table below:**
 
-1. **Effort per role and per phase.** Fable 5.1's own guidance: `high` for most
-   work, `xhigh` for the most capability-sensitive; `high` on Fable 5.1 still
-   exceeds `xhigh` on the previous generation. The template ships
-   `BUILD_EFFORT=high`, `FIX_EFFORT=xhigh` (re-run failures at the higher
-   setting — same pass rate, about half the cost), `REVIEW_EFFORT=high`, and
-   the `phases` manifest takes `effort=xhigh` for the hard phases and
-   `model=claude-sonnet-5 effort=medium` for the trivial ones (a release cut,
-   a config-only phase). With nothing set, every role runs Fable 5.1 at xhigh.
-2. **Cheaper subagents.** `SUBAGENT_MODEL=claude-sonnet-5` routes the
+1. **Model and effort per role and per phase.** The gate and the reviewer are
+   a failure signal, so the efficient shape is a cheap first attempt and
+   escalation on failure (same pass rate, about half the cost). The template
+   ships the builder on Opus 5.5 at `high` (`BUILD_MODEL`, `BUILD_EFFORT`),
+   fix rounds on Fable 5.1 at `xhigh` (`FIX_MODEL`, `FIX_EFFORT`) and the
+   reviewer on Fable 5.1 at `high` (`REVIEW_EFFORT`; a stronger model that
+   differs from the builder's is what makes the cheaper builder safe). The
+   `phases` manifest takes `model=claude-fable-5-1` for the hard phases and
+   `model=claude-sonnet-5-5 effort=medium` for the trivial ones (a release
+   cut, a config-only phase). With nothing set, every role runs Fable 5.1 at
+   xhigh; Fable 5.1's own guidance is `high` for most work, `xhigh` only for
+   the most capability-sensitive.
+2. **Cheaper subagents.** `SUBAGENT_MODEL=claude-sonnet-5-5` routes the
    subagents the builder and reviewer spawn (Explore, general-purpose, test
    audits) to a cheaper model; an agent definition that names its own model
    still wins.
@@ -269,10 +273,10 @@ All paths are relative to the project root. Phases are listed in
 | `MAX_FIX_ROUNDS` | `2` | Fix rounds per phase before it is recorded as blocked. |
 | `COMMIT_REVIEWS` / `REVIEWS_DIR` | `0` / `docs/verification` | Also commit the latest verdict into the repository. |
 | `CLAUDE_MODEL`, `CLAUDE_EFFORT` | `claude-fable-5-1`, `xhigh` | Model/effort for every role when nothing more specific is set. |
-| `BUILD_MODEL`, `BUILD_EFFORT` | ↑ | The builder's first attempt (template: `high`). |
-| `FIX_MODEL`, `FIX_EFFORT` | builder's | Fix rounds (template: `xhigh` — spend more after a failure signal). |
+| `BUILD_MODEL`, `BUILD_EFFORT` | ↑ | The builder's first attempt (template: `claude-opus-5-5`, `high`). |
+| `FIX_MODEL`, `FIX_EFFORT` | builder's | Fix rounds (template: `claude-fable-5-1`, `xhigh` — spend more after a failure signal). |
 | `REVIEW_MODEL`, `REVIEW_EFFORT` | ↑ | The reviewer, preflight and final review (template: `high`). |
-| `SUBAGENT_MODEL` | inherit | Model for subagents the agents spawn when their definition names none (template: `claude-sonnet-5`). |
+| `SUBAGENT_MODEL` | inherit | Model for subagents the agents spawn when their definition names none (template: `claude-sonnet-5-5`). |
 | `BASH_OUTPUT_MAX_CHARS` | Claude Code's 30000 | Inline characters of a Bash result; the rest is saved to a file the agent can grep (template: 16000). |
 | `FIX_CONTEXT` | `fresh` | `resume` continues the builder's session for fix rounds instead of a new context. |
 | `BUILD_BUDGET_USD`, `REVIEW_BUDGET_USD` | none | Hard spend cap per agent run. |
@@ -316,11 +320,11 @@ per-phase overrides after the path — `model=` `effort=` for the builder,
 for its reviewer:
 
 ```
-docs/phases/PHASE-2-CORE-ENGINE.md   effort=xhigh
-docs/phases/PHASE-7-RELEASE.md       model=claude-sonnet-5 effort=medium review_effort=medium
+docs/phases/PHASE-2-CORE-ENGINE.md   model=claude-fable-5-1
+docs/phases/PHASE-7-RELEASE.md       model=claude-sonnet-5-5 effort=medium review_effort=medium
 ```
 
-Put the top effort on the phases that need it rather than on all of them;
+Put the top model on the phases that need it rather than on all of them;
 `phase-runner build --dry-run` prints the resolved roles per phase.
 
 **Each phase file** is one self-contained slice: deliverables, steps, and an
