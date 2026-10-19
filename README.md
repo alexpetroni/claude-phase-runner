@@ -79,7 +79,7 @@ $EDITOR docs/ENTRY.md docs/phases/PHASE-0-SCAFFOLD.md   # the entry file and one
 $EDITOR .phase-runner/phases         # the plan files, one per line
 phase-runner build --dry-run         # prints the exact first builder prompt, launches nothing
 phase-runner preflight               # optional: what tooling/credentials the plan needs
-phase-runner build                   # go (use tmux; Ctrl-C is safe at any time)
+phase-runner build                   # go (use tmux; Ctrl-C is safe at any time — never kill the window, see Stopping a run)
 phase-runner status                  # any time, from another terminal
 phase-runner logs -f                 # follow the live agent transcript
 phase-runner review                  # after the build: adversarial review → REVIEW.md
@@ -440,6 +440,29 @@ Phases are keyed by their manifest path — renaming a file makes it look new.
 `phase-runner reset` wipes the state; the repository keeps whatever was
 committed.
 
+### Stopping a run
+
+Press **Ctrl-C in the terminal running `phase-runner build`**. The CLI is a
+foreground `docker compose run`, so the signal reaches the driver inside the
+container, the agent dies with it, and the container removes itself. Nothing
+is lost: the next `phase-runner build` resumes as described above.
+
+Closing that terminal or killing the tmux window instead stops only the
+client. The container keeps running, with the agent still working and still
+spending, and no terminal is attached to it any more. Finish the job by hand:
+
+```bash
+docker ps                    # a claude-phase-runner-runner-run-<id> container still listed?
+docker stop <container id>   # ends the driver and the agent; the container removes itself
+```
+
+Do this before starting another `phase-runner build` for the same project: two
+drivers on one `.phase-runner/state` and one working tree would step on each
+other. With `DOCKER_SOCKET=1`, containers the agent started for the project's
+stack are siblings on the host daemon and outlive the runner; `docker ps` lists
+them too, and they need their own `docker stop` or the project's
+`docker compose down`.
+
 ## Monitoring
 
 ```bash
@@ -571,6 +594,7 @@ the auth and re-run — the backlog is pushed first. `PUSH=0` disables pushing
 | `refusing to start a container with the kit as the project` | The project directory is the kit itself, whose code is mounted live into the run. Run a frozen clone's `bin/phase-runner` with `--project` pointing here, see [Building the kit with the kit](#building-the-kit-with-the-kit). |
 | `guard … BLOCKED` lines in the transcript | Working as intended. If a legitimate command is caught, add a narrower rule + a test case in `tests/guard.sh`. |
 | A completed phase runs again | Its manifest path changed, or the state was reset. |
+| Killed the tmux window or closed the terminal instead of pressing Ctrl-C | The container keeps running with no terminal attached. `docker ps`, then `docker stop <id>` on the `claude-phase-runner-runner-run-…` container; it removes itself. Then `phase-runner build` resumes. See [Stopping a run](#stopping-a-run). |
 | Need python/go/rust in the image | `EXTRA_APT_PACKAGES="python3 python3-pip"` in `runner.env`; the image rebuilds on the next run. |
 | Reviewer verdicts feel shallow | Sharpen the phase's Definition of Done (see [docs/WRITING-PHASES.md](docs/WRITING-PHASES.md)) and set `REVIEW_MODEL`/`REVIEW_EFFORT` higher than the builder's. |
 | A phase costs far more than its size suggests | Read the transcript for repeated full test runs and big output dumps; lower that phase's `effort=` in `phases`, set `BASH_OUTPUT_MAX_CHARS`, see [Cost](#cost). |

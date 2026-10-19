@@ -140,7 +140,7 @@ Next:
                                        (template: $KIT_DIR/templates/credentials.env)
   5. phase-runner build --dry-run    — prints the exact first builder prompt, launches nothing
   6. phase-runner preflight          — optional: what tooling/credentials the plan needs
-  7. phase-runner build              — run it (use tmux; Ctrl-C is safe at any time)
+  7. phase-runner build              — run it (use tmux; stop it with Ctrl-C, never by killing the window)
 EOF
 }
 
