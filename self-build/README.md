@@ -1,7 +1,7 @@
 # Hardening batch, October 2026 — how to run it
 
-Six phases that the runner executes on its own repository. `docs/ENTRY.md` is the entry
-file, the phase files are in this directory, and the project configuration is in
+Six phases that the runner executes on its own repository. `ENTRY.md` next to this file is
+the entry file, the phase files are in `phases/`, and the project configuration is in
 `.phase-runner/` (not committed).
 
 | Phase | What it fixes | Evidence |
@@ -29,7 +29,7 @@ PR=~/work/claude-phase-runner-frozen/bin/phase-runner
 # 2. a branch for the batch, with the plan committed
 cd ~/work/claude-phase-runner
 git switch -c improve/2026-10-hardening
-git add docs && git commit -m "docs: plan for the October 2026 hardening batch"
+git add self-build && git commit -m "docs: plan for the October 2026 hardening batch"
 
 # 3. check, then run — in tmux. The push remote is SSH: `ssh-add -l` must list
 #    your key. A desktop keyring usually provides the agent already; do not start

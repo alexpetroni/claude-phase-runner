@@ -38,7 +38,7 @@ Writing the plan: in Claude Code, in the project, say "write the phases for
 claude-phase-runner" — the /phase-runner skill writes the entry file, the phase
 files and the manifest, and prints the steps that follow.
 EOF
-  printf 'Documentation: %s/README.md\nThe plan-writing guide: %s/skills/phase-runner/WRITING-PHASES.md\n' "$KIT_DIR" "$KIT_DIR"
+  printf 'Documentation: %s/README.md to start, %s/docs/README.md for the rest\nThe plan-writing guide: %s/skills/phase-runner/WRITING-PHASES.md\n' "$KIT_DIR" "$KIT_DIR" "$KIT_DIR"
 }
 
 die()  { printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }

@@ -4,7 +4,7 @@
 # user (uid 1000 — matches the typical host repo owner) to run the driver.
 # Claude Code refuses --dangerously-skip-permissions as root, hence the
 # privilege drop. The container is sandboxed, so skipping permissions is
-# acceptable here (see README, "Security model").
+# acceptable here (see docs/security.md).
 set -euo pipefail
 
 cd "${PROJECT_DIR:?PROJECT_DIR is not set}"

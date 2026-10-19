@@ -19,7 +19,7 @@ Definition of Done.
   through `tests/run.sh`. Inspecting the installed Claude Code package on disk is fine;
   starting it is not.
 - **The guard hook around you refuses a Bash command that mentions `.phase-runner`,
-  `docs/ENTRY.md` or a phase file together with a writing construct** (`>`, `rm`, `cp`,
+  `self-build/ENTRY.md` or a phase file together with a writing construct** (`>`, `rm`, `cp`,
   `mv`, `tee`, `sed -i`, `chmod`, ...). Any `>` counts, including `2>&1` and
   `2>/dev/null`. This repository's code and tests are full of the string
   `.phase-runner`. So change files with the edit tools, and put an ad-hoc
@@ -32,9 +32,10 @@ Definition of Done.
 
 ## Read before your phase
 
-`README.md` is the specification of current behaviour: the configuration table, what
-happens in a phase, retries, resume, the guard, the security model. Then the code, about
-2,300 lines in all. Read the files your phase touches end to end.
+`README.md` and the pages under `docs/` are the specification of current behaviour:
+`docs/configuration.md` (every setting), `docs/how-it-works.md` (what happens in a
+phase), `docs/retries.md`, `docs/resume.md`, `docs/guard.md`, `docs/security.md`. Then
+the code, about 2,300 lines in all. Read the files your phase touches end to end.
 
 | Path | What it is |
 |---|---|
@@ -75,7 +76,7 @@ happens in a phase, retries, resume, the guard, the security model. Then the cod
 - **A setting exists in five places or it does not exist:** read with its default where
   it is used; listed under `environment:` in `docker-compose.yml` (a variable that is
   not listed there never reaches the driver); documented in `templates/runner.env`;
-  in the README configuration table; covered by a test. Settings are seconds, not
+  in the `docs/configuration.md` table; covered by a test. Settings are seconds, not
   milliseconds, and `0`/`1` for switches, like the existing ones.
 - **The separation of powers stays.** The builder never verifies itself, the reviewer is
   read-only with a fresh context, the runner pushes and the agent cannot. Do not weaken
@@ -90,9 +91,9 @@ happens in a phase, retries, resume, the guard, the security model. Then the cod
 - **Prompts change as little as the phase requires.** Say why a rule exists in one
   sentence so the agent can generalise from it, state things that are true in every
   configuration, and keep the text short.
-- **Docs move with the code.** Update every README section the change affects: the
-  configuration table, the section that describes the behaviour, Troubleshooting, and
-  the tests paragraph under "Iterating on the kit".
+- **Docs move with the code.** Update every documentation page the change affects:
+  the table in `docs/configuration.md`, the page that describes the behaviour,
+  `docs/troubleshooting.md`, and the tests paragraph in `docs/development.md`.
 - **Commits:** conventional (`feat:`, `fix:`, `test:`, `docs:`), one logical change per
   commit, the body says why. `git log` shows the house style.
 - **The entry file and the phase plans are read-only for you.** If you disagree with a

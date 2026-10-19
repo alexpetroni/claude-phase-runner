@@ -39,8 +39,8 @@ LIMIT_WAIT_MAX="${LIMIT_WAIT_MAX:-21600}"
 LIMIT_WAIT_GRACE="${LIMIT_WAIT_GRACE:-60}"
 # The agent's Bash tool. A command that outruns its timeout is moved to the
 # background by Claude Code, and in a headless run the agent then ends its
-# turn waiting for a notification that never comes (README "What happens in a
-# phase"). So: a long default timeout, a maximum that stays under the stall
+# turn waiting for a notification that never comes (docs/how-it-works.md). So:
+# a long default timeout, a maximum that stays under the stall
 # watchdog (a foreground command prints nothing while it runs), and
 # background tasks off. Seconds; the explicit values are kept apart from the
 # resolved ones so that only what the project set is validated.

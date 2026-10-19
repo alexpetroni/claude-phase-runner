@@ -51,7 +51,7 @@ MAX_FIX_ROUNDS="${MAX_FIX_ROUNDS:-2}"
 COMMIT_REVIEWS="${COMMIT_REVIEWS:-0}"
 REVIEWS_DIR="${REVIEWS_DIR:-docs/verification}"
 # fresh = every fix round starts a new context; resume = continue the builder's
-# own session (cheaper while its prompt cache is warm, see README "Cost").
+# own session (cheaper while its prompt cache is warm, see docs/cost.md).
 FIX_CONTEXT="${FIX_CONTEXT:-fresh}"
 # The phases manifest also carries per-phase options (`path model=… effort=…`).
 MANIFEST="${RUNNER_MANIFEST:-$PROJECT_DIR/.phase-runner/phases}"
