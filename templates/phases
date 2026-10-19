@@ -2,8 +2,9 @@
 # root. Lines starting with # are comments. Append new phases at the end: a
 # re-run skips every phase already recorded in .phase-runner/state/phases-done
 # (keyed by this path — renaming a file makes it look new).
-# How to write the phase files themselves: docs/WRITING-PHASES.md in the kit;
-# templates/PHASE.md is a skeleton.
+# How to write the phase files: in Claude Code, in the project, say "write the
+# phases for claude-phase-runner" (the /phase-runner skill); by hand, the
+# guide is skills/phase-runner/WRITING-PHASES.md in the kit.
 #
 # Options after the path override runner.env for that phase only:
 #   model= effort=              the builder          (e.g. a config-only phase on claude-sonnet-5-5)

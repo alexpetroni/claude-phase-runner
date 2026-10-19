@@ -2,8 +2,8 @@
 
 <!-- One builder run with a fresh context; the repository green at the end; 60–150
      lines. Deliverables as end states. A Definition of Done a read-only reviewer can
-     check item by item with a command or a file:line. docs/WRITING-PHASES.md in the
-     kit explains each section. Delete these comments. -->
+     check item by item with a command or a file:line. WRITING-PHASES.md next to this
+     skeleton explains each section. Delete these comments. -->
 
 ## Problem
 

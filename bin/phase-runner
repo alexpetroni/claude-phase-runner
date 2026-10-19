@@ -17,6 +17,8 @@ independent reviewer per phase, retries, resume, commit + push per phase.
 
 Usage: phase-runner [--project DIR] <command> [options]
 
+  install              once per machine: link this CLI into ~/.local/bin and the /phase-runner
+                       Claude Code skill into ~/.claude/skills; create the credentials file
   init                 create .phase-runner/ (runner.env + phases manifest) in the project
   build [--dry-run]    run every pending phase (default command):
                          builder → checkpoint → gate → reviewer → fix rounds → record → push
@@ -31,7 +33,12 @@ The project is the git repository containing the current directory unless
 --project is given (or PHASE_RUNNER_PROJECT is set).
 Credentials: ~/.config/claude-phase-runner/credentials.env (override with
 PHASE_RUNNER_CREDENTIALS). Template: templates/credentials.env in the kit.
+
+Writing the plan: in Claude Code, in the project, say "write the phases for
+claude-phase-runner" — the /phase-runner skill writes the entry file, the phase
+files and the manifest, and prints the steps that follow.
 EOF
+  printf 'Documentation: %s/README.md\nThe plan-writing guide: %s/skills/phase-runner/WRITING-PHASES.md\n' "$KIT_DIR" "$KIT_DIR"
 }
 
 die()  { printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
@@ -102,19 +109,70 @@ load_config() {
 
 rel() { printf '%s' "${1#"$PROJECT_DIR"/}"; }
 
-resolve_credentials() {
+credentials_default() { printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/claude-phase-runner/credentials.env"; }
+find_credentials() {  # → the first existing candidate, or nothing
   local c
-  for c in "${PHASE_RUNNER_CREDENTIALS:-}" \
-           "${XDG_CONFIG_HOME:-$HOME/.config}/claude-phase-runner/credentials.env"; do
-    [[ -n "$c" && -f "$c" ]] && { CREDENTIALS_FILE="$c"; break; }
+  for c in "${PHASE_RUNNER_CREDENTIALS:-}" "$(credentials_default)"; do
+    [[ -n "$c" && -f "$c" ]] && { printf '%s' "$c"; return 0; }
   done
-  [[ -n "${CREDENTIALS_FILE:-}" ]] || die "no credentials file. Create ~/.config/claude-phase-runner/credentials.env from $KIT_DIR/templates/credentials.env"
+  return 1
+}
+
+resolve_credentials() {
+  CREDENTIALS_FILE="$(find_credentials)" \
+    || die "no credentials file. Create ~/.config/claude-phase-runner/credentials.env from $KIT_DIR/templates/credentials.env (phase-runner install does it)"
   grep -qE '^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)=.+' "$CREDENTIALS_FILE" \
     || die "$CREDENTIALS_FILE sets neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY"
   export CREDENTIALS_FILE
 }
 
 # ── Commands ──────────────────────────────────────────────────────────────────
+SKILL_LINK="$HOME/.claude/skills/phase-runner"
+skill_installed() { [[ -f "$SKILL_LINK/SKILL.md" ]]; }
+
+link_into() {  # link_into TARGET LINK LABEL — a symlink is (re)pointed, anything else is left alone
+  if [[ -L "$2" ]]; then ln -sfn "$1" "$2"
+  elif [[ -e "$2" ]]; then warn "$2 exists and is not a symlink — left alone. To use the kit's copy: rm -r '$2' && ln -s '$1' '$2'"; return 0
+  else ln -s "$1" "$2"
+  fi
+  info "$3: $2 → $1"
+}
+
+# Once per machine. Everything it creates is a symlink into the kit or a copy of a
+# template, so `git pull` in the kit updates the CLI and the skill in place. The
+# skill is a personal one (~/.claude/skills), so every Claude Code session on the
+# machine has /phase-runner; the agents inside a run never see it, their home is
+# the project's .phase-runner/home.
+cmd_install() {
+  local bin="$HOME/.local/bin" creds
+  creds="$(credentials_default)"
+  mkdir -p "$bin" "$(dirname "$SKILL_LINK")" "$(dirname "$creds")"
+  link_into "$KIT_DIR/bin/phase-runner" "$bin/phase-runner" "CLI"
+  link_into "$KIT_DIR/skills/phase-runner" "$SKILL_LINK" "Claude Code skill /phase-runner"
+  if [[ -f "$creds" ]]; then
+    info "Credentials: $creds (kept)"
+  else
+    cp "$KIT_DIR/templates/credentials.env" "$creds" && chmod 600 "$creds"
+    info "Credentials: $creds created from the template — add your token to it (claude setup-token, or an API key)"
+  fi
+  case ":$PATH:" in
+    *":$bin:"*) ;;
+    *) warn "$bin is not on your PATH — add it, or link $KIT_DIR/bin/phase-runner into a directory that is" ;;
+  esac
+  cat <<EOF
+
+Then, in a project:
+  1. Open Claude Code in the project and talk it through: what to build, the stack,
+     what "done" means, the decisions you do not want revisited.
+  2. Say "write the phases for claude-phase-runner" (or /phase-runner). The skill runs
+     phase-runner init, writes the entry file and the phase files into the project,
+     fills .phase-runner/phases and the gate, and prints the steps that follow.
+  3. phase-runner build — in tmux; Ctrl-C stops it cleanly, never kill the window.
+     phase-runner status says where it is and what comes next.
+Details: $KIT_DIR/README.md
+EOF
+}
+
 cmd_init() {
   resolve_project
   mkdir -p "$PR_DIR"
@@ -131,17 +189,22 @@ cmd_init() {
   cat <<EOF
 
 Next:
-  1. Edit .phase-runner/runner.env   — ENTRY_FILE, GATE_CMD, models, push settings
-  2. Write the plan                  — the entry file and one file per phase, committed
-                                       (how: $KIT_DIR/docs/WRITING-PHASES.md;
-                                        skeletons: $KIT_DIR/templates/ENTRY.md, PHASE.md)
-  3. Edit .phase-runner/phases       — the phase plan files, one per line, in order
-  4. Credentials once per machine    — ~/.config/claude-phase-runner/credentials.env
-                                       (template: $KIT_DIR/templates/credentials.env)
-  5. phase-runner build --dry-run    — prints the exact first builder prompt, launches nothing
-  6. phase-runner preflight          — optional: what tooling/credentials the plan needs
-  7. phase-runner build              — run it (use tmux; stop it with Ctrl-C, never by killing the window)
+  1. Write the plan — in Claude Code, in this directory: talk the project through, then
+     say "write the phases for claude-phase-runner". The /phase-runner skill writes
+     docs/ENTRY.md and docs/phases/*.md, fills .phase-runner/phases and GATE_CMD in
+     .phase-runner/runner.env, and prints the steps that follow.
 EOF
+  skill_installed || printf '     ⚠ The skill is not installed on this machine: run `phase-runner install` first.\n'
+  cat <<EOF
+     By hand: $KIT_DIR/skills/phase-runner/WRITING-PHASES.md; the skeletons ENTRY.md
+     and PHASE.md are next to it.
+  2. Commit the plan — an uncommitted plan lands in the builder's first checkpoint commit.
+  3. phase-runner build --dry-run    — the exact first builder prompt; launches nothing
+  4. phase-runner build              — in tmux; Ctrl-C stops it cleanly, never kill the window
+EOF
+  find_credentials >/dev/null \
+    || printf '     Before the first build: credentials, once per machine — %s\n     (template: %s/templates/credentials.env; `phase-runner install` creates it)\n' "$(credentials_default)" "$KIT_DIR"
+  printf 'Watch: phase-runner status · phase-runner logs -f.   Details: %s/README.md\n' "$KIT_DIR"
 }
 
 # docker-compose.yml bind-mounts this kit's docker/ and prompts/ live into the
@@ -227,13 +290,15 @@ cmd_status() {
   phases="$(read_manifest "$PR_DIR/phases")"
   [[ -n "$phases" ]] || die "no phases listed in $(rel "$PR_DIR/phases")"
   local done_f="$STATE/phases-done" blocked_f="$STATE/blocked" runs="$STATE/runs.tsv"
-  local p status verdict rounds cost min
+  local p status verdict rounds cost min missing=0 all_done=1
   printf '%-46s %-11s %-8s %6s %9s %6s\n' PHASE STATUS VERDICT ROUNDS COST MIN
   for p in $phases; do
     status=pending; verdict=-; rounds=-; cost=-; min=-
     if grep -qxF "$p" "$done_f" 2>/dev/null; then status="done"
     elif grep -qF "$p	" "$blocked_f" 2>/dev/null; then status=BLOCKED
+    elif [[ ! -f "$PROJECT_DIR/$p" ]]; then status=missing; missing=1
     fi
+    [[ "$status" == "done" ]] || all_done=0
     if [[ -f "$runs" ]]; then
       read -r rounds cost min verdict < <(awk -F'\t' -v p="$p" '
         NR > 1 && $2 == p {
@@ -255,6 +320,19 @@ cmd_status() {
     awk -F'\t' '{ print "  " $1 " — " $2 }' "$blocked_f"
   fi
   [[ -f "$STATE/SUMMARY.md" ]] && { echo; echo "Last run: $(head -1 "$STATE/SUMMARY.md" | sed 's/^# //')"; }
+  local next
+  if (( missing )); then
+    next="write the plan — in Claude Code say \"write the phases for claude-phase-runner\" — or fix the paths in $(rel "$PR_DIR/phases")"
+  elif [[ -s "$blocked_f" ]]; then
+    next="read $(rel "$STATE")/reviews/<phase>.md, fix the plan or the code, then phase-runner build (completed phases are skipped)"
+  elif (( all_done )); then
+    next="phase-runner review for an adversarial review of the result, or append phases to $(rel "$PR_DIR/phases") and build again"
+  elif [[ ! -f "$runs" ]]; then
+    next="phase-runner build --dry-run, then phase-runner build in tmux"
+  else
+    next="phase-runner build resumes where the last run stopped; if a run is live, phase-runner logs -f follows it"
+  fi
+  echo; echo "Next: $next"
   echo "Verdicts: $(rel "$STATE")/reviews/ · logs: phase-runner logs [PHASE] [-f] · the runner's own log: phase-runner logs driver"
 }
 
@@ -301,6 +379,7 @@ cmd_reset() {
 }
 
 case "$CMD" in
+  install)   cmd_install ;;
   init)      cmd_init ;;
   build)     if has_arg --dry-run; then cmd_run dry-run; else cmd_run build; fi ;;
   dry-run)   cmd_run dry-run ;;

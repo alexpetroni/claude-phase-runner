@@ -12,6 +12,12 @@ Everything per-project lives **inside the target project** under
 `.phase-runner/` (config, phase manifest, state, verdicts, logs), excluded from
 git locally. The kit directory holds code only. Credentials are user-level.
 
+The plan comes out of a conversation. You talk the project through with Claude
+Code, then say *"write the phases for claude-phase-runner"*: the `/phase-runner`
+skill that ships with the kit writes the entry file, the phase files and the
+manifest into the project and prints the steps that follow. Then
+`phase-runner build`.
+
 ```
 phase-runner build  (host)  →  docker compose run  →  driver.sh, per phase file:
 ┌────────────────────────────────────────────────────────────────────────────┐
@@ -35,15 +41,15 @@ cannot touch the plan files, and that the reviewer cannot edit anything.
 ## Contents
 
 ```
-bin/phase-runner          host CLI: init · build · preflight · review · status · logs · reset
+bin/phase-runner          host CLI: install · init · build · preflight · review · status · logs · reset
 docker/Dockerfile         node 24 + git + docker CLI + pnpm + jq + Claude Code (pinnable)
 docker/bootstrap.sh       root entrypoint: socket group, git identity, trust, drop to node
 docker/driver.sh          the phase loop: builder → gate → reviewer → fix rounds → push
 docker/lib/               claude.sh (roles, retries, watchdog) · git.sh · common.sh · renderers
 docker/guard.sh           the enforcement hook (per-role rules, tested)
 prompts/*.md              builder, fix (fresh or resumed), reviewer, preflight, final-review instructions, the rules and no-Docker notes — edit freely
-templates/                runner.env, phases, credentials.env starting points; ENTRY.md and PHASE.md skeletons for the plan
-docs/WRITING-PHASES.md    how to write the plan: cutting phases, the entry file, the Definition of Done, the manifest
+skills/phase-runner/      the Claude Code skill that writes the plan: SKILL.md (the procedure), WRITING-PHASES.md (the guide), ENTRY.md and PHASE.md (skeletons); `install` links it into ~/.claude/skills
+templates/                runner.env, phases, credentials.env — what `init` and `install` copy
 tests/                    bash tests/run.sh — driver, CLI, lint and guard tests with a fake `claude`; smoke.sh — the real container, dry run, no API call
 .github/workflows/ci.yml  both on every push and pull request: run.sh (job `test`) and smoke.sh (job `smoke`)
 docker-compose.yml        container definition (same-path repo mount, optional host Docker socket, agent home)
@@ -64,19 +70,48 @@ docker-compose.yml        container definition (same-path repo mount, optional h
 
 ## Quick start
 
-```bash
-# once per machine
-ln -s "$PWD/bin/phase-runner" ~/.local/bin/phase-runner      # or add bin/ to PATH
-mkdir -p ~/.config/claude-phase-runner
-cp templates/credentials.env ~/.config/claude-phase-runner/credentials.env   # then add your token
+Once per machine:
 
-# in the target project
+```bash
+git clone git@github.com:alexpetroni/claude-phase-runner.git ~/work/claude-phase-runner
+~/work/claude-phase-runner/bin/phase-runner install
+$EDITOR ~/.config/claude-phase-runner/credentials.env   # one token: `claude setup-token`, or an API key
+```
+
+`install` links the CLI into `~/.local/bin`, links the `/phase-runner` skill
+into `~/.claude/skills` — that is how Claude Code knows how to write a plan for
+the runner — and creates the credentials file from the template.
+
+Then, per project, three steps:
+
+1. **Talk the project through** with Claude Code, in the project directory: what
+   to build, the stack, what "done" means, the decisions you do not want
+   revisited.
+2. **Say "write the phases for claude-phase-runner."** The skill takes over: it
+   runs `phase-runner init`, writes `docs/ENTRY.md` and one
+   `docs/phases/PHASE-N-<slug>.md` per phase with a Definition of Done a reviewer
+   can check, fills `.phase-runner/phases` and the gate command in
+   `.phase-runner/runner.env`, and ends with the steps that follow. Read the
+   plan — it is the one part of the loop no reviewer checks — and commit it.
+3. **`phase-runner build`**, in tmux. Ctrl-C stops it cleanly at any point and
+   the next `build` resumes. From another terminal, `phase-runner status` says
+   where it is and what to do next, `phase-runner logs -f` follows the agent,
+   and `phase-runner help` names this README.
+
+Everything per project — configuration, manifest, state, verdicts, logs — lives
+in the project under `.phase-runner/`, excluded from git. The plan is committed
+with the code.
+
+The same by hand, which is also what the skill does:
+
+```bash
 cd ~/work/my-project
-phase-runner init                    # creates .phase-runner/{runner.env,phases}
-$EDITOR .phase-runner/runner.env     # ENTRY_FILE, GATE_CMD, models, push
-# write the plan — docs/WRITING-PHASES.md; start from templates/ENTRY.md and templates/PHASE.md
-$EDITOR docs/ENTRY.md docs/phases/PHASE-0-SCAFFOLD.md   # the entry file and one file per phase; commit them
-$EDITOR .phase-runner/phases         # the plan files, one per line
+phase-runner init                    # .phase-runner/{runner.env,phases}; prints these steps
+$EDITOR .phase-runner/runner.env     # GATE_CMD; ENTRY_FILE, models, push, DOCKER_SOCKET
+# the plan: skills/phase-runner/WRITING-PHASES.md explains it; ENTRY.md and PHASE.md next to it are skeletons
+$EDITOR docs/ENTRY.md docs/phases/PHASE-0-SCAFFOLD.md   # the entry file and one file per phase
+$EDITOR .phase-runner/phases         # the phase files, one per line, in order
+git add docs && git commit -m "docs: build plan"        # before the first run
 phase-runner build --dry-run         # prints the exact first builder prompt, launches nothing
 phase-runner preflight               # optional: what tooling/credentials the plan needs
 phase-runner build                   # go (use tmux; Ctrl-C is safe at any time — never kill the window, see Stopping a run)
@@ -86,20 +121,21 @@ phase-runner review                  # after the build: adversarial review → R
 ```
 
 Prerequisites: Docker with the compose plugin, `jq` on the host (for `logs`
-and `status`), a target project that is a git repository, and a Claude Code
-credential — a subscription OAuth token from `claude setup-token` or an
-`ANTHROPIC_API_KEY`. For SSH push remotes, a running `ssh-agent` with the key
-added (see [Pushing](#pushing)).
+and `status`), a target project that is a git repository, Claude Code on the
+host for the conversation, and a Claude Code credential — a subscription OAuth
+token from `claude setup-token` or an `ANTHROPIC_API_KEY`. For SSH push
+remotes, a running `ssh-agent` with the key added (see [Pushing](#pushing)).
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `phase-runner init` | Create `.phase-runner/` in the project from the templates and exclude it from git. Idempotent. |
+| `phase-runner install` | Once per machine: link the CLI into `~/.local/bin` and the `/phase-runner` skill into `~/.claude/skills`, create `~/.config/claude-phase-runner/credentials.env` from the template. Symlinks, so `git pull` in the kit updates both; re-run only after moving the kit. |
+| `phase-runner init` | Create `.phase-runner/` in the project from the templates, exclude it from git, print the next steps. Idempotent. |
 | `phase-runner build` | Run every pending phase (the default command). `--dry-run` validates everything, prints the first pending phase's builder prompt and exits. |
 | `phase-runner preflight` | Read-only tooling assessment of the whole plan → `.phase-runner/state/TOOLING.md`. |
 | `phase-runner review` | Read-only adversarial review of the finished project → `.phase-runner/state/REVIEW.md`. |
-| `phase-runner status` | Table of phases: status, last verdict, fix rounds, cost, minutes. No container. |
+| `phase-runner status` | Table of phases: status (`pending`, `partial`, `done`, `BLOCKED`, `missing`), last verdict, fix rounds, cost, minutes — and the next step. No container. |
 | `phase-runner logs [PHASE] [-f]` | Readable transcript of the latest agent or gate log, or the newest log matching PHASE. `-f` follows. |
 | `phase-runner logs driver [-f]` | The runner's own log (`state/logs/driver.log`): every start, retry, wait, verdict and stop, as plain text. `-f` follows. |
 | `phase-runner reset [--yes]` | Delete `.phase-runner/state`. Config, phases and the agent home stay. |
@@ -308,9 +344,11 @@ project's `.env` files without ever seeing its token.
 
 How to write them — cutting a project into phases, what belongs in the entry
 file, what makes a Definition of Done checkable, the manifest, the checks
-before the first run — is in [docs/WRITING-PHASES.md](docs/WRITING-PHASES.md);
-`templates/ENTRY.md` and `templates/PHASE.md` are skeletons to start from. In
-short:
+before the first run — is in
+[skills/phase-runner/WRITING-PHASES.md](skills/phase-runner/WRITING-PHASES.md),
+with the `ENTRY.md` and `PHASE.md` skeletons next to it. That directory is the
+`/phase-runner` skill, so what Claude follows when you ask it to write the
+phases is what you read to do it by hand. In short:
 
 **The entry file** is read first and prepended to every prompt. Put in it: the
 mission and what "done" means for the product; the binding engineering rules
@@ -339,6 +377,17 @@ explicit **Definition of Done** the reviewer can check item by item. The
 better the DoD, the better the verdict: "all 37 ported tests pass, none
 skipped" is checkable; "the engine works" is not. If a phase has no explicit
 DoD the reviewer derives one from the deliverables and says so.
+
+**The skill.** `phase-runner install` links `skills/phase-runner/` into
+`~/.claude/skills/` as a personal skill: every Claude Code session on the
+machine has `/phase-runner`, and Claude loads it on its own when you ask for
+phases or a plan for the runner. The procedure: check the kit and the
+repository, run `phase-runner init`, ask whatever is still open in one message,
+write the entry file and the phase files by the guide, fill the manifest and the
+gate, hand over the next steps. It does not commit and does not start Docker.
+After a blocked phase the same request revises the plan from the verdict. The
+agents inside a run never see it: their home is `.phase-runner/home`, not
+yours.
 
 **Networking note for verification steps:** with `DOCKER_SOCKET=1` the agent
 starts the project's stack as *sibling* containers (docker-out-of-docker), so
@@ -584,6 +633,7 @@ the auth and re-run — the backlog is pushed first. `PUSH=0` disables pushing
 | The tmux scrollback is gone and you don't know what the run did or why it stopped | `phase-runner logs driver`: every line the driver printed, timestamped, across runs — retries, usage-limit waits, red gates, verdicts, the final `FAIL` line. The `Run stopped with …` rows below are all there. |
 | `no credentials file` | Create `~/.config/claude-phase-runner/credentials.env` from the template with exactly one of `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`. |
 | `no config at .phase-runner/runner.env` | Run `phase-runner init` in the project, or pass `--project DIR`. |
+| Claude Code has no `/phase-runner`, or writes a plan in a format of its own | The skill is not linked: `phase-runner install` (`phase-runner init` says so too). Claude Code picks the new skill up in the running session. |
 | Phase BLOCKED after fix rounds | Read `state/reviews/<phase>.md`. Fix the plan or the code yourself, or raise `MAX_FIX_ROUNDS`, then re-run: the phase restarts from its prompt on the committed state. |
 | Builder reported blocked | Read `state/reviews/<phase>.blocked.md`; it names what it needs. Provide it (credentials, a decision, a package), re-run. |
 | `push failed 3 times` | No SSH agent forwarded (`ssh-add -l` in the launching terminal must list the key; a new agent is empty and replaces the keyring's agent for that terminal, so `eval $(ssh-agent); ssh-add` only when there is none at all) / bad token in the remote URL. Fix, re-run — the backlog pushes first. With `PUSH=1` the driver checks the remote before the first agent (`Push remote … is NOT reachable` warning in the first minute, details in `logs/push.log`), so this is usually visible at the start of the run. |
@@ -596,7 +646,7 @@ the auth and re-run — the backlog is pushed first. `PUSH=0` disables pushing
 | A completed phase runs again | Its manifest path changed, or the state was reset. |
 | Killed the tmux window or closed the terminal instead of pressing Ctrl-C | The container keeps running with no terminal attached. `docker ps`, then `docker stop <id>` on the `claude-phase-runner-runner-run-…` container; it removes itself. Then `phase-runner build` resumes. See [Stopping a run](#stopping-a-run). |
 | Need python/go/rust in the image | `EXTRA_APT_PACKAGES="python3 python3-pip"` in `runner.env`; the image rebuilds on the next run. |
-| Reviewer verdicts feel shallow | Sharpen the phase's Definition of Done (see [docs/WRITING-PHASES.md](docs/WRITING-PHASES.md)) and set `REVIEW_MODEL`/`REVIEW_EFFORT` higher than the builder's. |
+| Reviewer verdicts feel shallow | Sharpen the phase's Definition of Done (see [skills/phase-runner/WRITING-PHASES.md](skills/phase-runner/WRITING-PHASES.md)) and set `REVIEW_MODEL`/`REVIEW_EFFORT` higher than the builder's. |
 | A phase costs far more than its size suggests | Read the transcript for repeated full test runs and big output dumps; lower that phase's `effort=` in `phases`, set `BASH_OUTPUT_MAX_CHARS`, see [Cost](#cost). |
 | Run stopped with `usage limit: the … window resets at …` | The reset was further away than `LIMIT_WAIT_MAX`, so the driver stopped instead of sleeping. Re-run `phase-runner build` after the time it names — the run resumes where it stopped — or raise `LIMIT_WAIT_MAX` above the distance to have the runner wait. A reset within `LIMIT_WAIT_MAX` is waited out automatically, whatever the CLI's wording ("hit your session limit", "out of usage credits · resets …"). |
 | Run stopped with `out of usage credits — top up …` | The CLI sent no rejected `rate_limit_event` with a reset time, so there is nothing to wait for: top up, wait for the window yourself, or switch to API billing. |
@@ -624,7 +674,10 @@ an allowed event), blocked builder, resume after an interruption (builder
 skipped), per-phase manifest options, per-role model/effort, subagent model
 and output cap, `FIX_CONTEXT=resume` with fallback, dry run, two phases,
 committed verdicts, reviewer leaving files, uncommitted leftovers, preflight,
-final review, the host CLI, the `DOCKER_SOCKET` switch (with a fake `docker`),
+final review, the host CLI (`install` into a scratch `HOME`: the two links, the
+credentials file created then kept, an existing skill directory left alone;
+`init`'s next steps with and without the skill and the credentials; `status`'s
+`missing` state and its `Next:` line in every state), the `DOCKER_SOCKET` switch (with a fake `docker`),
 `RUNNER_IMAGE` as the image name the CLI inspects (default
 `claude-phase-runner:latest`), the CLI refusing to build the kit itself, the Bash tool settings (defaults
 and explicit values as every role's process receives them, derived defaults

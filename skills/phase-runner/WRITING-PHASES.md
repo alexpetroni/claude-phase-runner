@@ -13,7 +13,7 @@ else carries from one phase to the next. That shapes everything below: **the
 repository and the plan are the builder's only memory, and the Definition of Done is
 the only contract the reviewer enforces.**
 
-Starting points: `templates/ENTRY.md` and `templates/PHASE.md` in the kit. Copy them
+Starting points: `ENTRY.md` and `PHASE.md` next to this file in the kit. Copy them
 into the project, fill them in, delete the guidance comments.
 
 ## 1. Cut the project into phases
@@ -84,7 +84,7 @@ builder cannot know unless you state them:
 
 ## 3. Write each phase file
 
-Use the sections of `templates/PHASE.md`.
+Use the sections of `PHASE.md`, next to this file.
 
 **Title.** The outcome as a sentence, not the activity: "The runner's own account of a
 run is kept", not "Logging".
@@ -167,11 +167,24 @@ builder will: together with the repository, it is everything the builder gets.
 ## 7. Let Claude draft the plan
 
 The plan is the one part of this loop that no reviewer checks, so draft it in an
-interactive session where you can push back, then read every file yourself. In Claude
-Code, in the project:
+interactive session where you can push back, then read every file yourself. The kit
+ships the procedure as a Claude Code skill: `phase-runner install` links this directory
+into `~/.claude/skills/`, and from then on, in Claude Code in the project, once the
+project has been talked through:
 
-> Read `templates/ENTRY.md`, `templates/PHASE.md` and `docs/WRITING-PHASES.md` in
-> `<path to the kit>`. Then read this repository and `<the spec, if there is one>`.
+> Write the phases for claude-phase-runner.
+
+or `/phase-runner`. The skill (`SKILL.md` next to this file) checks the kit and the
+repository, runs `phase-runner init`, asks what is still open in one message, writes
+the entry file and the phase files by this guide, fills the manifest and the gate, and
+ends with the steps that follow. After a blocked phase the same request revises the
+plan from the verdict.
+
+Without the skill, paste the procedure yourself:
+
+> Read `ENTRY.md`, `PHASE.md` and `WRITING-PHASES.md` in
+> `<path to the kit>/skills/phase-runner`. Then read this repository and `<the spec,
+> if there is one>`.
 > Write `docs/ENTRY.md` and `docs/phases/PHASE-0-<slug>.md` … `PHASE-N-<slug>.md` for:
 > `<what to build, the decisions already made, what done means>`. Each phase is one
 > focused day of work, ends with the repository green, and has a Definition of Done a

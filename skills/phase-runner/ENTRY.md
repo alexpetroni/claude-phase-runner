@@ -3,7 +3,7 @@
 <!-- Prepended to EVERY prompt: builder, fix round, reviewer, preflight, final review.
      Only what holds in every phase. No phase scoping (the runner adds it), no
      self-verification or PASS files (the runner's reviewer does that), nothing about
-     pushing (the runner pushes; the agent cannot). docs/WRITING-PHASES.md in the kit
+     pushing (the runner pushes; the agent cannot). WRITING-PHASES.md next to this skeleton
      explains each section. Delete these comments. -->
 
 ## What we are building

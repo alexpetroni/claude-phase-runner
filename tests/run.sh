@@ -752,6 +752,85 @@ assert_file "$FIXPASS_PROJECT/.phase-runner/runner.env"
 bash "$KIT/bin/phase-runner" --project "$p" bogus >/dev/null 2>&1; rc=$?
 assert_eq "$rc" 1 "unknown command rc"
 
+scenario "host CLI: install links the CLI and the /phase-runner skill into HOME and creates the credentials file; init and status say what comes next"
+h="$TMP/home-install"; mkdir -p "$h"
+OUT="$TMP/out-install.log"
+HOME="$h" bash "$KIT/bin/phase-runner" install >"$OUT" 2>&1; rc=$?
+assert_eq "$rc" 0 "install rc"
+[[ -L "$h/.local/bin/phase-runner" && "$(readlink -f "$h/.local/bin/phase-runner")" == "$(readlink -f "$KIT/bin/phase-runner")" ]] \
+  && ok || bad "CLI link: $(readlink "$h/.local/bin/phase-runner" 2>&1)"
+[[ -L "$h/.claude/skills/phase-runner" && "$(readlink -f "$h/.claude/skills/phase-runner")" == "$(readlink -f "$KIT/skills/phase-runner")" ]] \
+  && ok || bad "skill link: $(readlink "$h/.claude/skills/phase-runner" 2>&1)"
+assert_file "$h/.config/claude-phase-runner/credentials.env"
+cmp -s "$h/.config/claude-phase-runner/credentials.env" "$KIT/templates/credentials.env" && ok || bad "the credentials file is not the template"
+assert_grep 'add your token' "$OUT"
+assert_grep 'is not on your PATH' "$OUT"
+assert_grep 'write the phases for claude-phase-runner' "$OUT"
+# the skill as Claude Code reads it: through the link, frontmatter first, every file it names in place
+s="$h/.claude/skills/phase-runner"
+assert_eq "$(head -1 "$s/SKILL.md")" '---' "SKILL.md opens with frontmatter"
+assert_grep '^name: phase-runner$' "$s/SKILL.md"
+assert_grep '^description: .*claude-phase-runner' "$s/SKILL.md"
+for f in WRITING-PHASES.md ENTRY.md PHASE.md; do
+  assert_file "$s/$f"
+  assert_grep "\`$f\`" "$s/SKILL.md"
+done
+assert_not_grep 'templates/ENTRY.md|templates/PHASE.md|docs/WRITING-PHASES.md' "$s/WRITING-PHASES.md"
+# a second install re-points the links and keeps an existing credentials file
+printf 'CLAUDE_CODE_OAUTH_TOKEN=secret\n' > "$h/.config/claude-phase-runner/credentials.env"
+HOME="$h" bash "$KIT/bin/phase-runner" install >"$OUT" 2>&1; rc=$?
+assert_eq "$rc" 0 "second install rc"
+assert_grep '^CLAUDE_CODE_OAUTH_TOKEN=secret$' "$h/.config/claude-phase-runner/credentials.env"
+assert_not_grep 'add your token' "$OUT"
+# a real directory where the skill link would go is left alone
+h2="$TMP/home-install2"; mkdir -p "$h2/.claude/skills/phase-runner"; printf 'mine\n' > "$h2/.claude/skills/phase-runner/SKILL.md"
+HOME="$h2" bash "$KIT/bin/phase-runner" install >"$OUT" 2>&1; rc=$?
+assert_eq "$rc" 0 "install over a real directory rc"
+assert_grep 'is not a symlink' "$OUT"
+assert_eq "$(cat "$h2/.claude/skills/phase-runner/SKILL.md")" mine "an existing skill directory is untouched"
+# help names the docs and the new command
+bash "$KIT/bin/phase-runner" help >"$TMP/help.txt" 2>&1
+assert_grep "^Documentation: $KIT/README.md" "$TMP/help.txt"
+assert_grep '^  install ' "$TMP/help.txt"
+# init's next steps: the conversation first; a missing skill and missing credentials are named
+p="$(new_project next)"
+HOME="$h" bash "$KIT/bin/phase-runner" --project "$p" init >"$OUT" 2>&1; rc=$?
+assert_eq "$rc" 0 "init rc"
+assert_grep 'write the phases for claude-phase-runner' "$OUT"
+assert_grep 'skills/phase-runner/WRITING-PHASES.md' "$OUT"
+assert_not_grep 'skill is not installed' "$OUT"
+assert_not_grep 'credentials' "$OUT"
+h3="$TMP/home-empty"; mkdir -p "$h3"
+HOME="$h3" bash "$KIT/bin/phase-runner" --project "$p" init >"$OUT" 2>&1; rc=$?
+assert_eq "$rc" 0 "init rc (empty home)"
+assert_grep 'skill is not installed.*phase-runner install' "$OUT"
+assert_grep "credentials.*$h3/.config/claude-phase-runner/credentials.env" "$OUT"
+# status: the template's example phase files do not exist yet → missing, and the next step is the plan
+st="$TMP/st.log"
+HOME="$h" bash "$KIT/bin/phase-runner" --project "$p" status >"$st" 2>&1; rc=$?
+assert_eq "$rc" 0 "status rc (missing files)"
+assert_grep '^docs/phases/PHASE-0.md +missing' "$st"
+assert_grep '^Next: write the plan' "$st"
+printf 'plan/A.md\nplan/B.md\n' > "$p/.phase-runner/phases"
+HOME="$h" bash "$KIT/bin/phase-runner" --project "$p" status >"$st" 2>&1
+assert_grep '^plan/A.md +pending' "$st"
+assert_grep '^Next: phase-runner build --dry-run' "$st"
+mkdir -p "$p/.phase-runner/state"
+printf 'plan/A.md\nplan/B.md\n' > "$p/.phase-runner/state/phases-done"
+HOME="$h" bash "$KIT/bin/phase-runner" --project "$p" status >"$st" 2>&1
+assert_grep '^Next: phase-runner review' "$st"
+printf 'plan/A.md\n' > "$p/.phase-runner/state/phases-done"
+printf 'plan/B.md\tfix rounds exhausted\n' > "$p/.phase-runner/state/blocked"
+HOME="$h" bash "$KIT/bin/phase-runner" --project "$p" status >"$st" 2>&1
+assert_grep '^plan/B.md +BLOCKED' "$st"
+assert_grep '^Next: read \.phase-runner/state/reviews/' "$st"
+rm "$p/.phase-runner/state/blocked"
+printf 'ts\tphase\trole\tround\toutcome\tseconds\tcost\tturns\n' > "$p/.phase-runner/state/runs.tsv"
+HOME="$h" bash "$KIT/bin/phase-runner" --project "$p" status >"$st" 2>&1
+assert_grep '^Next: phase-runner build resumes' "$st"
+grep -q 'logs driver' <<<"$(tail -1 "$st")" && ok || bad "the driver-log line is no longer the last line of status"
+unset h h2 h3 s st
+
 scenario "host CLI: DOCKER_SOCKET decides whether the host Docker socket is mounted (fake docker)"
 p="$(new_project clidocker)"
 mkdir -p "$p/.phase-runner" "$TMP/fakedocker"
